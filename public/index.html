@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>成语接龙</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="seal">接</span>
+      <div>
+        <h1>成语接龙</h1>
+        <p class="tagline">上一词的末字，是下一词的首字</p>
+      </div>
+    </div>
+    <div class="me">
+      <span id="conn" class="conn" title="连接状态"><i></i><span>连接中</span></span>
+      <label class="name-field">
+        <span>昵称</span>
+        <input id="name-input" maxlength="12" placeholder="给自己起个名字" autocomplete="off" />
+      </label>
+      <span id="my-tag" class="my-tag"></span>
+    </div>
+  </header>
+
+  <!-- 大厅 -->
+  <main id="lobby" class="lobby">
+    <aside class="panel online-panel">
+      <div class="panel-head">
+        <h2>在线玩家 <span id="online-count" class="count">0</span></h2>
+      </div>
+      <div class="search">
+        <input id="search-input" type="search" placeholder="搜索昵称或 #编号" autocomplete="off" />
+      </div>
+      <ul id="online-list" class="online-list"></ul>
+    </aside>
+
+    <section class="center">
+      <div class="panel hero">
+        <h2>开始一局</h2>
+        <div class="actions">
+          <button id="btn-quick" class="btn primary big">
+            <span class="btn-title">快速匹配</span>
+            <span class="btn-sub" id="quick-sub">自动为你找一位对手并建房</span>
+          </button>
+          <button id="btn-create" class="btn big">
+            <span class="btn-title">创建房间</span>
+            <span class="btn-sub">生成房间码，邀请朋友加入</span>
+          </button>
+        </div>
+        <form id="join-form" class="join-form" autocomplete="off">
+          <input id="code-input" maxlength="5" placeholder="输入 5 位房间码" />
+          <button class="btn" type="submit">加入</button>
+        </form>
+      </div>
+
+      <div id="room-card" class="panel room-card hidden"></div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>等待中的房间</h2>
+        </div>
+        <ul id="rooms-list" class="rooms-list"></ul>
+      </div>
+    </section>
+  </main>
+
+  <!-- 对局 -->
+  <main id="game" class="game hidden">
+    <section class="panel scoreboard">
+      <div class="vs">
+        <div class="side me-side">
+          <span class="label">我</span>
+          <strong id="me-name"></strong>
+        </div>
+        <span class="vs-mark">VS</span>
+        <div class="side opp-side">
+          <span class="label">对手</span>
+          <strong id="opp-name"></strong>
+        </div>
+      </div>
+      <div class="timer">
+        <div class="timer-text"><span id="timer-who"></span><b id="timer-sec">--</b>s</div>
+        <div class="timer-bar"><i id="timer-fill"></i></div>
+      </div>
+      <button id="btn-resign" class="btn ghost small">认输</button>
+    </section>
+
+    <section class="panel stage">
+      <div class="next-card">
+        <p id="next-hint" class="next-hint"></p>
+        <div id="next-char" class="next-char">成</div>
+      </div>
+      <div id="log" class="log"></div>
+    </section>
+
+    <section class="panel history-panel">
+      <div class="panel-head"><h2>接龙记录</h2><span id="history-count" class="count"></span></div>
+      <ol id="history" class="history"></ol>
+    </section>
+
+    <section class="panel action-panel" id="action-panel"></section>
+  </main>
+
+  <!-- 邀请 -->
+  <div id="invites" class="invites"></div>
+
+  <!-- 对局结束 -->
+  <div id="result" class="overlay hidden">
+    <div class="result-card">
+      <div id="result-mark" class="result-mark">胜</div>
+      <h3 id="result-title"></h3>
+      <p id="result-reason" class="muted"></p>
+      <div class="result-actions">
+        <button id="btn-rematch" class="btn primary">再来一局</button>
+        <button id="btn-leave" class="btn">返回大厅</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

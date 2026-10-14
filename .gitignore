@@ -1,0 +1,4 @@
+node_modules/
+data/words.json
+*.log
+.DS_Store
