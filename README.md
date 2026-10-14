@@ -27,7 +27,7 @@
 
 ```bash
 npm install
-npm run build:dict   # 生成词典 data/words.json（从 GitHub 下载 pwxcoo/chinese-xinhua，MIT）
+npm run build:dict   # 可选：手动生成词典 data/words.json（npm start 首次运行也会自动生成）
 npm test             # 运行规则与大厅的单元测试
 npm start            # 默认 http://localhost:3000，可用 PORT 环境变量修改
 ```

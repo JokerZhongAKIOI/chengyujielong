@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { loadDict } from './dict.js';
 import { Hub } from './hub.js';
+import { buildDict } from '../scripts/build-dict.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(here, '..', 'public');
@@ -22,9 +23,17 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
 };
 
-if (!existsSync(join(here, '..', 'data', 'words.json'))) {
-  console.error('未找到词典 data/words.json，请先运行: npm run build:dict');
-  process.exit(1);
+const DICT_FILE = join(here, '..', 'data', 'words.json');
+if (!existsSync(DICT_FILE)) {
+  // 首次运行：自动下载并生成词典
+  console.log('未找到词典，首次运行将自动下载生成（约需几十秒）…');
+  try {
+    await buildDict();
+  } catch (e) {
+    console.error(`自动生成词典失败：${e.message}`);
+    console.error('可以手动运行 npm run build:dict 排查（需要能访问 codeload.github.com）');
+    process.exit(1);
+  }
 }
 const dict = loadDict();
 const hub = new Hub({ dict });
