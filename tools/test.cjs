@@ -179,9 +179,16 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
   });
 
   const vector = await openPdf(load('vector-math.pdf'));
-  await testAsync('矢量公式 + 表格线 + 项目符号 + 普通括号：只认出真正的公式', async () => {
-    const p = await vector.pageText(1);
-    assert.strictEqual(p.holes.length, 9, `检测到 ${p.holes.length} 处`);
+  const vectorPage = await vector.pageText(1);
+  await testAsync('矢量公式 + 表格线 + 项目符号 + 普通括号：只认出真正的公式', () => {
+    assert.strictEqual(vectorPage.holes.length, 10, `检测到 ${vectorPage.holes.length} 处`);
+    assert.strictEqual(vectorPage.holes.filter((h) => h.inline).length, 9, '9 处是行内公式');
+  });
+  await testAsync('独占一行的大公式（上下都是文字行）也认得出来', () => {
+    const disp = vectorPage.holes.filter((h) => !h.inline);
+    assert.strictEqual(disp.length, 1, `检测到 ${disp.length} 处独占公式`);
+    assert.ok(disp[0].x1 - disp[0].x0 > 100, '应该是一个宽公式');
+    assert.ok(disp[0].y1 - disp[0].y0 > 20, '应该比正文行高');
   });
 
   console.log('\n# 占位符与版面');
@@ -280,6 +287,21 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     }, fakeDeps([({ want }) => Array.from({ length: want }, (_, i) => `${i + 1}. ?`).join('\n')], logs));
     assert.ok(r.holes === 28);
     assert.ok(r.body.includes('[公式]'), '没认出来的要有兜底');
+  });
+
+  await testAsync('整页交给模型的页，不会再为它的公式裁一次图（省一次页面渲染）', async () => {
+    const logs = [];
+    let stripCalls = 0;
+    const orig = p2196.holeStrip;
+    p2196.holeStrip = async (...a) => { stripCalls++; return orig.apply(p2196, a); };
+    try {
+      const r = await plugin.recognizePdf({
+        handle: p2196, engine: 'ai', cfg: cfgWithApi(), title: '葫芦娃救爷爷', pid: 'P2196', auto: false, progress: () => {},
+      }, fakeDeps(['# 整页转写'], logs));
+      assert.strictEqual(r.engine, 'ai');
+      assert.strictEqual(stripCalls, 0, `不该为整页识别的页裁公式（裁了 ${stripCalls} 次）`);
+      assert.ok(!r.body.includes('%%H'));
+    } finally { p2196.holeStrip = orig; }
   });
 
   console.log('\n# 静态检查');

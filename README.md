@@ -24,6 +24,7 @@ goj.wiki（Hydro）题目页上的用户脚本：把题面里嵌着的 PDF 认�
 - 落在文字行空隙里、大小又和字号相当的封闭图形 → 认定这里有一个公式，插入占位符；
 - 独占一行、上下都是文字行的图形簇 → 同样认定是公式；
 - 背景块、表格线、插图、页面边框都会因为“太大 / 太细”被排除；
+- 独占一行的大公式（分数、求和那种，上下都是文字行）同样认得出；
 - 公式真文字（文字层里有 `≤`、`n`、`10^5`）的 PDF 一处都不会误报（`tools/fixtures/plain-text-math.pdf` 就是这条的回归用例）。
 
 补全方式（按设置里的“PDF 识别方式”）：
@@ -70,7 +71,7 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 16 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 18 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：

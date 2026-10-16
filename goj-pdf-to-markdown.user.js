@@ -60,7 +60,7 @@
   const HOLE_MIN_GAP = 0.6;                 // 文字行里的空隙宽于 0.6 倍字号，才可能藏着一个公式
   const HOLE_BOX_W = 4.5;                   // “字形大小”的矢量图形：宽 / 高不超过字号的若干倍（背景块、表格线、插图都超过）
   const HOLE_BOX_H = 3.2;
-  const HOLE_PAD_X = 0.5;                   // 裁图时在公式四周留的空白（倍字号）
+  const HOLE_PAD_X = 0.2;                   // 裁图时左右留的空白（倍字号）：留太多会把旁边汉字裁进来
   const HOLE_PAD_Y = 0.8;
   const MAX_HOLES_PAGE = 40;                // 一页最多补多少个公式
   const MAX_HOLES_DOC = 240;                // 一份 PDF 最多补多少个公式
@@ -2252,7 +2252,7 @@
    * 把每个洞落实成 { tex } / { img } / { miss }。
    * 优先级：模型识别出的 LaTeX → 截图（可在设置里关掉）→ [公式]
    */
-  async function resolveHoles(holeOut, holePages, holesOf, handle, cfg, deps) {
+  async function resolveHoles(holeOut, holePages, holesOf, handle, cfg, deps, used) {
     const info = new Map();
     const needImg = [];
     for (const k of holePages) {
@@ -2260,6 +2260,7 @@
       const got = holeOut.get(k);
       holes.forEach((h, i) => {
         const key = `${k}-${i}`;
+        if (used && !used.has(key)) return;              // 这一页整页交给模型了（或被跳过）：它的占位符用不上，不用裁图
         const idx = got ? got.used.indexOf(i) : -1;
         const tex = idx >= 0 ? got.tex[idx] : null;
         if (tex) info.set(key, { tex });
@@ -2735,8 +2736,10 @@
     }
     flush();
     const joinSegs = (a) => a.filter((x) => x && x.trim()).join('\n\n');
-    // 占位符 → LaTeX / 截图 / [公式]
-    const holeInfo = await resolveHoles(holeOut, holePages, holesOf, handle, cfg, deps);
+    // 占位符 → LaTeX / 截图 / [公式]。只处理最终正文里真的用得上的那些（整页交给模型的页不需要裁图）
+    const usedHoleMarks = new Set();
+    for (const m of joinSegs(segs).matchAll(/%%H(\d+)-(\d+)%%/g)) usedHoleMarks.add(`${m[1]}-${m[2]}`);
+    const holeInfo = await resolveHoles(holeOut, holePages, holesOf, handle, cfg, deps, usedHoleMarks);
     const patch = (md) => (md.indexOf('%%H') < 0 ? md : applyHoles(md, holeInfo));
     const body = patch(joinSegs(segs));
     if (!body.trim()) throw new UserError('NO_TEXT', '没有识别出任何内容');
