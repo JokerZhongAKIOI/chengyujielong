@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.8.0
+// @version      2.9.0
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.8.0';
+  const VERSION = '2.9.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -81,7 +81,9 @@
   const LIST_MAX_AI_PAGES = 60;             // 手动复制题单时，整个题单最多让视觉模型识别的页数；用完后其余的题只读文字层
   const LIST_RETRIES = 2;                   // 取题面页遇到 429 / 5xx / 网络错误时的重试次数（退避 1 秒、2 秒）
   const ENGINES = ['auto', 'text', 'ai'];
-  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true };
+  const EMPTY_API = { apiUrl: '', apiKey: '', model: '', extraBody: '' };   // 一套接口（主 / 备用）
+  // alt：备用接口（没配就是空壳）；useAlt：当前先用哪一套（两套都填好时可以来回切）
+  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', alt: null, useAlt: false, auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true };
 
   const PRESETS = [
     { id: 'zhipu', name: '智谱 GLM-4.6V-Flash（免费）', apiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4.6v-flash', extraBody: '{"thinking":{"type":"disabled"}}',
@@ -2646,6 +2648,33 @@
     return /\/chat\/completions$/.test(u) ? u : `${u}/chat/completions`;
   }
 
+  /* ---- 主接口 / 备用接口 -------------------------------------------------
+   * 两套都填好时可以来回切（配置里的 useAlt 决定先用哪套）；一套挂了（额度用完 / Key 失效 /
+   * 模型不吃图片）就自动改用另一套接着跑。这里只算“先试谁、后试谁”，真正的请求在 chat() 里。
+   * -------------------------------------------------------------------- */
+  function apiSide(cfg, which) {
+    const a = (cfg && cfg.alt) || EMPTY_API;
+    if (which === 'alt') return { apiUrl: a.apiUrl || '', apiKey: a.apiKey || '', model: a.model || '', extraBody: a.extraBody || '', label: '备用接口' };
+    return { apiUrl: (cfg && cfg.apiUrl) || '', apiKey: (cfg && cfg.apiKey) || '', model: (cfg && cfg.model) || '', extraBody: (cfg && cfg.extraBody) || '', label: '主接口' };
+  }
+
+  const sideReady = (side) => !!(side && side.apiUrl && side.apiKey && side.model);
+  const hasAlt = (cfg) => sideReady(apiSide(cfg, 'alt'));
+
+  /** 依次尝试的接口：当前这套在前，另一套在后（没填全的不参与，也不会重复）。 */
+  function apiOrder(cfg) {
+    const main = apiSide(cfg, 'main');
+    const alt = apiSide(cfg, 'alt');
+    const mainOk = sideReady(main);
+    const altOk = sideReady(alt);
+    if (cfg && cfg.useAlt && altOk) return mainOk ? [alt, main] : [alt];
+    if (!mainOk && altOk) return [alt];
+    return altOk ? [main, alt] : [main];
+  }
+
+  /** 当前先用的那一套（面板上显示的“现在用主接口 / 备用接口”就是它）。 */
+  const activeApi = (cfg) => apiOrder(cfg)[0];
+
   function parseExtra(text) {
     const t = String(text || '').trim();
     if (!t) return {};
@@ -2658,10 +2687,12 @@
   function configProblems(cfg) {
     cfg = cfg || {};
     const bad = [];
-    if (!/^https?:\/\/\S+$/i.test(String(cfg.apiUrl || '').trim())) bad.push('接口地址');
-    if (!String(cfg.apiKey || '').trim()) bad.push('API Key');
-    if (!String(cfg.model || '').trim()) bad.push('模型名');
-    try { parseExtra(cfg.extraBody); } catch (e) { bad.push('额外请求参数（JSON 格式错误）'); }
+    const a = activeApi(cfg);            // 当前用的那套（主接口 / 备用接口）
+    if (!/^https?:\/\/\S+$/i.test(String(a.apiUrl || '').trim())) bad.push(`${a.label}的接口地址`);
+    if (!String(a.apiKey || '').trim()) bad.push(`${a.label}的 API Key`);
+    if (!String(a.model || '').trim()) bad.push(`${a.label}的模型名`);
+    try { parseExtra(a.extraBody); } catch (e) { bad.push(`${a.label}的额外请求参数（JSON 格式错误）`); }
+    if (cfg.useAlt && !hasAlt(cfg)) bad.push('备用接口（勾了“当前使用备用接口”，但地址 / Key / 模型名没填全）');
     return bad;
   }
 
@@ -2717,8 +2748,8 @@
     return false;
   }
 
-  /** 发一次 chat/completions；deps = { http({method,url,headers,data,timeout}) → {status,text}, sleep }。 */
-  async function chat(cfg, content, deps) {
+  /** 用某一套接口（主 / 备用）发一次 chat/completions；deps = { http({method,url,headers,data,timeout}) → {status,text}, sleep }。 */
+  async function chatOnce(cfg, content, deps) {
     const url = normalizeEndpoint(cfg.apiUrl);
     const body = Object.assign({ model: cfg.model, messages: [{ role: 'user', content }], temperature: 0, max_tokens: 8192 }, parseExtra(cfg.extraBody));
     let transient = 0;
@@ -2741,6 +2772,31 @@
       }
       throw new Error(describeHttpError(res.status, msg));
     }
+  }
+
+  /**
+   * 发一次 chat/completions。配了备用接口时：先用当前那套（配置里 useAlt 决定是哪套），
+   * 失败（额度用完 / Key 失效 / 模型不吃图片……）就自动改用另一套再试一次，
+   * 并在这一次运行里记住能用的那套 —— 后面的请求不再白撞一次。
+   */
+  async function chat(cfg, content, deps) {
+    const order = apiOrder(cfg);
+    const at = cfg && cfg.__side ? order.findIndex((x) => x.label === cfg.__side) : -1;
+    for (let i = at > 0 ? at : 0; i < order.length; i++) {
+      const side = order[i];
+      try {
+        const r = await chatOnce(side, content, deps);
+        if (i > 0 && cfg) cfg.__side = side.label;      // 这套能用，后面的请求直接用它
+        return r;
+      } catch (e) {
+        const next = order[i + 1];
+        if (!next) throw e;
+        if (deps && deps.ui && deps.ui.log) {
+          deps.ui.log(`⚠️ ${side.label}（${side.model}）不能用：${e.message}\n   改用${next.label}（${next.model}）重试这一次……`);
+        }
+      }
+    }
+    throw new Error('主接口和备用接口都没跑通');
   }
 
   const STRIP_PROMPT = [
@@ -3074,7 +3130,11 @@
     return out;
   }
 
-  const loadConfig = (storage) => Object.assign({}, DEFAULT_CFG, storage.get(CFG_KEY, {}) || {});
+  const loadConfig = (storage) => {
+    const c = Object.assign({}, DEFAULT_CFG, storage.get(CFG_KEY, {}) || {});
+    c.alt = Object.assign({}, EMPTY_API, c.alt || {});      // 备用接口：老配置里没有就补成空壳
+    return c;
+  };
 
   /** 题单里相邻两道题之间的间隔（毫秒）：缺省 / 非法 → 0.5 秒，最大 10 秒。 */
   const listGapOf = (cfg) => {
@@ -3519,17 +3579,30 @@
       }
     }
 
-    async function testConnection(cfg) {
-      const bad = configProblems(cfg);
+    /** 测试一套接口：默认测“当前先用哪套”，only='alt' 测备用接口。只发一次请求，不会自动换另一套。 */
+    async function testConnection(cfg, only) {
+      const side = only === 'alt' ? apiSide(cfg, 'alt') : activeApi(cfg);
+      const bad = configProblems(Object.assign({}, cfg, { apiUrl: side.apiUrl, apiKey: side.apiKey, model: side.model, extraBody: side.extraBody, alt: null, useAlt: false }));
       if (bad.length) throw new UserError('CFG', `还没填好：${bad.join('、')}`);
-      const r = await chat(cfg, [
+      const r = await chatOnce(side, [
         { type: 'text', text: '这是一张空白图片。请只回复两个字母：OK' },
         { type: 'image_url', image_url: { url: deps.testImage() } },
       ], deps);
       return r.text.trim().slice(0, 80);
     }
 
-    return { run, runList, cancel, repick, testConnection, getLast: () => last, isBusy: () => running };
+    /** 主接口 ↔ 备用接口：翻一下配置（上层负责重跑一遍）。 */
+    function switchApi() {
+      const cfg = loadConfig(storage);
+      if (!hasAlt(cfg)) throw new UserError('CFG', '还没配“备用接口”：设置里把备用接口的地址、API Key、模型名填上。');
+      cfg.useAlt = !cfg.useAlt;
+      storage.set(CFG_KEY, cfg);
+      const a = activeApi(cfg);
+      ui.log(`已切到${a.label}：${a.model}（${a.apiUrl}）`);
+      return { useAlt: cfg.useAlt, label: a.label, model: a.model };
+    }
+
+    return { run, runList, cancel, repick, testConnection, switchApi, getLast: () => last, isBusy: () => running };
   }
 
   /* ---------------------------------------------------------------------- *
@@ -3540,6 +3613,7 @@
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
     findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
     plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS, rootHint,
+    EMPTY_API, apiSide, sideReady, hasAlt, apiOrder, activeApi,
     pageData, statementFromPageData, pdfLinksFromMarkdown, unescapeJs,
     looksLikeHtml, hashBytes, checkPdfBytes, pdfRefOf, isPdfUrl,
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
@@ -3906,6 +3980,7 @@
         <button class="flat ghost" data-act="stop" id="stopBtn" title="当前这道题处理完就停；已处理的题照常合并复制" hidden>停止</button>
         <button class="flat ghost" data-act="rerun" id="rerunBtn" title="忽略缓存，按当前设置重新识别">重新识别</button>
         <button class="flat ghost" data-act="rerun-ai" title="把每一页渲染成图片交给视觉模型识别（需要先配置 API）">AI 重新识别</button>
+        <button class="flat ghost" data-act="switch" id="switchBtn" title="主接口 / 备用接口来回切换（设置里两套都填好才会出现）" hidden>⇄ 备用</button>
         <button class="flat" data-act="copy">复制</button>
         <button class="flat ghost" data-act="close">关闭</button>
       </div>
@@ -3933,6 +4008,16 @@
         <label>API Key <small>只保存在脚本管理器本地，只会发给上面的接口地址</small><input type="password" id="apiKey" autocomplete="off"></label>
         <label>模型名 <small>必须是支持图片输入的模型</small><input type="text" id="model"></label>
         <label>额外请求参数（可选，JSON 对象） <small>会合并进请求体，如关闭思考、调大 max_tokens</small><textarea id="extra" spellcheck="false"></textarea></label>
+        <b style="font-size:13px">备用接口 <small>可选：两套都填好就能来回切（面板上的 ⇄），一套挂了会自动改用另一套</small></b>
+        <label>快速填充（备用）<select id="altPreset"></select></label>
+        <label>接口地址（备用）<input type="text" id="altUrl"></label>
+        <label>API Key（备用） <small>和主接口一样只保存在本地</small><input type="password" id="altKey" autocomplete="off"></label>
+        <label>模型名（备用）<input type="text" id="altModel"></label>
+        <label>额外请求参数（备用，可选，JSON 对象）<textarea id="altExtra" spellcheck="false"></textarea></label>
+        <div class="row">
+          <label class="check grow"><input type="checkbox" id="usealt"> 当前使用备用接口 <small>（勾上 = 切到备用；取消 = 切回主接口）</small></label>
+          <button class="flat ghost" data-act="test-alt">测试备用接口</button>
+        </div>
         <div class="row end">
           <label class="grow">并发数 <small>同时识别几页（免费额度常限制为 1）</small><input type="number" id="concurrency" min="1" max="6"></label>
           <label class="check"><input type="checkbox" id="auto"> 打开题目页时自动识别并复制</label>
@@ -3944,7 +4029,7 @@
         <label class="check"><input type="checkbox" id="listeach"> 逐题写入剪贴板 <small>（每转换完一道题先复制一次，最后再复制整份；给剪贴板历史工具用）</small></label>
         <div class="msg" id="msg"></div>
         <div class="row">
-          <button class="flat ghost" data-act="test">测试连接</button>
+          <button class="flat ghost" data-act="test" title="测试当前选中的那套接口（勾了“当前使用备用接口”就测备用）">测试连接</button>
           <span class="grow"></span>
           <button class="flat ghost" data-act="cancel">取消</button>
           <button class="flat" data-act="save">保存</button>
@@ -3973,6 +4058,7 @@
     const msg = $('msg');
     const fields = {
       engine: $('engine'), apiUrl: $('apiUrl'), apiKey: $('apiKey'), model: $('model'), extra: $('extra'), concurrency: $('concurrency'), auto: $('auto'), pick: $('pickon'), holeImg: $('holeimg'),
+      altUrl: $('altUrl'), altKey: $('altKey'), altModel: $('altModel'), altExtra: $('altExtra'), useAlt: $('usealt'),
       listAuto: $('listauto'), listGap: $('listgap'), listEach: $('listeach'),
     };
     $('panel').dataset.mode = h.mode || 'problem';
@@ -3985,12 +4071,14 @@
     fields.apiKey.placeholder = 'sk-...';
     fields.model.placeholder = '例如 glm-4.6v-flash（必须是支持图片输入的模型）';
     fields.extra.placeholder = '例如 {"thinking":{"type":"disabled"}}';
-    $('preset').innerHTML = '<option value="">— 选择服务商 —</option>';
-    PRESETS.forEach((p) => {
-      const o = document.createElement('option');
-      o.value = p.id;
-      o.textContent = p.name;
-      $('preset').appendChild(o);
+    ['preset', 'altPreset'].forEach((id) => {
+      $(id).innerHTML = '<option value="">— 选择服务商 —</option>';
+      PRESETS.forEach((p) => {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name;
+        $(id).appendChild(o);
+      });
     });
 
     const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `msg${kind ? ` ${kind}` : ''}`; };
@@ -4007,7 +4095,23 @@
       listAuto: fields.listAuto.checked,
       listGap: Number.isNaN(parseInt(fields.listGap.value, 10)) ? LIST_GAP_MS : Math.max(0, Math.min(LIST_GAP_MAX, parseInt(fields.listGap.value, 10))),
       listEach: fields.listEach.checked,
+      alt: {
+        apiUrl: fields.altUrl.value.trim(),
+        apiKey: fields.altKey.value.trim(),
+        model: fields.altModel.value.trim(),
+        extraBody: fields.altExtra.value.trim(),
+      },
+      useAlt: fields.useAlt.checked,
     });
+    /** 备份接口填全了才显示面板上的 ⇄ 按钮，并写清切过去会用哪个模型。 */
+    function updateSwitch() {
+      const btn = $('switchBtn');
+      const c = h.getConfig();
+      const ok = hasAlt(c);
+      btn.hidden = !ok;
+      if (ok) btn.textContent = c.useAlt ? '⇄ 切回主接口' : `⇄ 切到备用（${shorten(c.alt.model, 16)}）`;
+      return ok;
+    }
     const openPanel = () => { $('panel').hidden = false; };
     const openSettings = () => {
       const c = h.getConfig();
@@ -4023,8 +4127,15 @@
       fields.listAuto.checked = c.listAuto !== false;
       fields.listGap.value = listGapOf(c);
       fields.listEach.checked = !!c.listEach;
+      const alt = c.alt || EMPTY_API;
+      fields.altUrl.value = alt.apiUrl || '';
+      fields.altKey.value = alt.apiKey || '';
+      fields.altModel.value = alt.model || '';
+      fields.altExtra.value = alt.extraBody || '';
+      fields.useAlt.checked = !!c.useAlt;
       $('preset').value = '';
-      setMsg('');
+      $('altPreset').value = '';
+      setMsg(hasAlt(c) ? `现在用${activeApi(c).label}：${activeApi(c).model}` : '');
       $('modal').hidden = false;
     };
 
@@ -4035,6 +4146,15 @@
       if (p.model) fields.model.value = p.model;
       fields.extra.value = p.extraBody;
       setMsg(p.note || '');
+    });
+
+    $('altPreset').addEventListener('change', (e) => {         // 备用接口的“快速填充”
+      const p = PRESETS.find((x) => x.id === e.target.value);
+      if (!p || p.id === 'custom') return;
+      fields.altUrl.value = p.apiUrl;
+      if (p.model) fields.altModel.value = p.model;
+      fields.altExtra.value = p.extraBody;
+      setMsg(`备用接口：${p.name}\n${p.note || ''}`);
     });
 
     $('pickSel').addEventListener('change', (e) => h.repick(e.target.value));
@@ -4059,10 +4179,15 @@
         case 'save': {
           const cfg = readForm();
           // API 是可选的：什么都没填可以直接保存；填了一部分、或者选了“总是用视觉模型”，就必须填完整
-          const touched = cfg.apiUrl || cfg.apiKey || cfg.model || cfg.extraBody;
+          const alt = cfg.alt || {};
+          const altTouched = alt.apiUrl || alt.apiKey || alt.model || alt.extraBody;
+          const touched = cfg.apiUrl || cfg.apiKey || cfg.model || cfg.extraBody || altTouched;
           const bad = touched || cfg.engine === 'ai' ? configProblems(cfg) : [];
+          // 备用接口只填了一半：多半是漏了，直接说清楚（全留空 = 不用备用接口）
+          if (altTouched && !hasAlt(cfg)) bad.push('备用接口（地址 / API Key / 模型名要一起填，或者全留空）');
           if (bad.length) { setMsg(`还没填好：${bad.join('、')}`, 'err'); break; }
           h.saveConfig(cfg);
+          updateSwitch();
           $('modal').hidden = true;
           h.onSaved();
           break;
@@ -4070,6 +4195,19 @@
         case 'test': {
           setMsg('正在连接……');
           try { setMsg(`连接成功。模型回复：${await h.test(readForm())}`, 'ok'); } catch (err) { setMsg(err.message, 'err'); }
+          break;
+        }
+        case 'test-alt': {
+          setMsg('正在连接备用接口……');
+          try { setMsg(`备用接口连接成功。模型回复：${await h.test(readForm(), 'alt')}`, 'ok'); } catch (err) { setMsg(err.message, 'err'); }
+          break;
+        }
+        case 'switch': {
+          try {
+            h.switchApi();
+            updateSwitch();
+            h.run({ force: true });          // 切完立刻用新接口重跑一遍，方便对比
+          } catch (err) { setMsg(err.message, 'err'); openSettings(); }
           break;
         }
         default:
@@ -4085,6 +4223,7 @@
     return {
       state(name, label, title) { main.dataset.state = name; main.textContent = label; main.title = title || ''; },
       stateName: () => main.dataset.state,
+      updateSwitch,
       log(line) { logEl.textContent += `${logEl.textContent ? '\n' : ''}${line}`; logEl.scrollTop = logEl.scrollHeight; },
       clearLog() { logEl.textContent = ''; },
       /** 题单复制进行中：显示面板里的“停止”按钮。 */
@@ -4182,7 +4321,8 @@
           ui.log(e.message);
         }
       },
-      test: (cfg) => runner.testConnection(cfg),
+      test: (cfg, only) => runner.testConnection(cfg, only),
+      switchApi: () => runner.switchApi(),
       onSaved: () => {
         if (isList) {                                                // 题单页：间隔改了，按钮上的提示跟着变；不会因为改设置就重新跑一遍整个题单
           if (ui.stateName() === 'idle' && listCount()) ui.state('idle', listLabel(listCount()), listTip());
@@ -4191,6 +4331,7 @@
     });
     if (isList) ui.state('idle', '📚 复制题单全部题面', '正在找题单里的题目……');
     else ui.state('idle', '📋 题面转 Markdown', '识别题面里的 PDF 并复制 Markdown');
+    ui.updateSwitch();
 
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('⚙️ 设置', () => ui.openSettings());

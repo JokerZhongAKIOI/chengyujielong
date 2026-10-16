@@ -799,6 +799,102 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(calls, 3, '429 要退避重试 2 次再报错');
   });
 
+  await testAsync('备用接口：主接口报错时自动换备用，同一次运行里之后不再白撞主接口', async () => {
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, {
+      apiUrl: 'https://main.example.com/v1/chat/completions', apiKey: 'sk-main', model: 'glm-4.6v-flash',
+      alt: { apiUrl: 'https://alt.example.com/v1/chat/completions', apiKey: 'sk-alt', model: 'deepseek-flash', extraBody: '' },
+      useAlt: false,
+    });
+    const models = [];
+    const logs = [];
+    const deps = {
+      sleep: async () => {},
+      ui: { log: (m) => logs.push(m) },
+      http: async (opts) => {
+        models.push(JSON.parse(opts.data).model);
+        if (/main\.example\.com/.test(opts.url)) return { status: 401, text: JSON.stringify({ error: { message: 'Authentication Fails' } }) };
+        return { status: 200, text: JSON.stringify({ choices: [{ message: { content: '1. $n$' }, finish_reason: 'stop' }] }) };
+      },
+    };
+    assert.strictEqual(plugin.activeApi(cfg).label, '主接口');
+    assert.deepStrictEqual(plugin.apiOrder(cfg).map((x) => x.label), ['主接口', '备用接口']);
+    const r = await plugin.chat(cfg, plugin.stripContent('data:image/png;base64,AAA', 1), deps);
+    assert.strictEqual(r.text, '1. $n$');
+    assert.deepStrictEqual(models, ['glm-4.6v-flash', 'deepseek-flash'], '主接口 401 → 换备用');
+    assert.ok(logs.some((m) => /改用备用接口/.test(m) && /deepseek-flash/.test(m)), logs.join(' ｜ '));
+    models.length = 0;
+    await plugin.chat(cfg, plugin.stripContent('data:image/png;base64,AAA', 1), deps);
+    assert.deepStrictEqual(models, ['deepseek-flash'], '同一次运行里记住能用的那套');
+  });
+
+  await testAsync('备用接口：勾了“当前使用备用”就先走备用，备用挂了自动回主接口', async () => {
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, {
+      apiUrl: 'https://main.example.com/v1/chat/completions', apiKey: 'sk-main', model: 'glm-4.6v-flash',
+      alt: { apiUrl: 'https://alt.example.com/v1/chat/completions', apiKey: 'sk-alt', model: 'deepseek-flash', extraBody: '' },
+      useAlt: true,
+    });
+    const models = [];
+    const deps = {
+      sleep: async () => {}, ui: { log: () => {} },
+      http: async (opts) => {
+        const m = JSON.parse(opts.data).model;
+        models.push(m);
+        if (/alt\.example\.com/.test(opts.url)) return { status: 403, text: JSON.stringify({ error: { message: 'quota exceeded' } }) };
+        return { status: 200, text: JSON.stringify({ choices: [{ message: { content: '1. $p_i$' }, finish_reason: 'stop' }] }) };
+      },
+    };
+    assert.strictEqual(plugin.activeApi(cfg).label, '备用接口');
+    assert.deepStrictEqual(plugin.apiOrder(cfg).map((x) => x.label), ['备用接口', '主接口']);
+    const r = await plugin.chat(cfg, plugin.stripContent('data:image/png;base64,AAA', 1), deps);
+    assert.strictEqual(r.text, '1. $p_i$');
+    assert.deepStrictEqual(models, ['deepseek-flash', 'glm-4.6v-flash'], '备用 403 → 回主接口');
+    // 只配了备用（主接口空着）：顺序里就只有备用
+    const onlyAlt = Object.assign({}, plugin.DEFAULT_CFG, { alt: cfg.alt, useAlt: true });
+    assert.deepStrictEqual(plugin.apiOrder(onlyAlt).map((x) => x.label), ['备用接口']);
+    assert.strictEqual(plugin.hasAlt(onlyAlt), true);
+    assert.strictEqual(plugin.hasAlt(plugin.DEFAULT_CFG), false);
+  });
+
+  await testAsync('备用接口：配置校验说清是哪一套没填好，老配置（没有 alt）也能读', async () => {
+    const cfg = plugin.loadConfig({ get: (k, d) => d });
+    assert.deepStrictEqual(cfg.alt, { apiUrl: '', apiKey: '', model: '', extraBody: '' }, '老配置要补成空壳，不能是 null');
+    assert.strictEqual(cfg.useAlt, false);
+    const bad = plugin.configProblems(Object.assign({}, plugin.DEFAULT_CFG, {
+      apiUrl: 'https://main/v1/chat/completions', apiKey: 'sk', model: 'm',
+      alt: { apiUrl: '', apiKey: '', model: '' }, useAlt: true,
+    }));
+    assert.ok(bad.some((x) => /备用接口/.test(x)), bad.join('、'));
+    const badMain = plugin.configProblems(Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: '', apiKey: '', model: '' }));
+    assert.ok(badMain.some((x) => /主接口的接口地址/.test(x)), `要说清是哪一套：${badMain.join('、')}`);
+    assert.deepStrictEqual(plugin.configProblems(Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'https://a/v1/chat/completions', apiKey: 'sk', model: 'm' })), []);
+  });
+
+  await testAsync('备用接口：面板上的 ⇄ 一按就真的切过去了（配置翻面 + 日志说清切到哪套）', async () => {
+    const { JSDOM } = require('jsdom');
+    const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.goj.wiki/p/P2196' });
+    const storage = new Map();
+    storage.set(plugin.CFG_KEY, Object.assign({}, plugin.DEFAULT_CFG, {
+      apiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', apiKey: 'sk-a', model: 'glm-4.6v-flash',
+      alt: { apiUrl: 'https://api.deepseek.com/chat/completions', apiKey: 'sk-b', model: 'deepseek-flash', extraBody: '' },
+      useAlt: false,
+    }));
+    const logs = [];
+    const runner = plugin.createRunner({
+      doc: dom.window.document, loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, ask: async () => true },
+      loadPdf: async () => { throw new Error('不该读 PDF'); }, sleep: async () => {}, copy: async () => true,
+      http: async () => { throw new Error('不该发请求'); },
+    });
+    const first = runner.switchApi();
+    assert.strictEqual(first.useAlt, true);
+    assert.strictEqual(storage.get(plugin.CFG_KEY).useAlt, true, '配置要真的写回去');
+    assert.ok(/已切到备用接口/.test(logs.join('\n')) && /deepseek-flash/.test(logs.join('\n')), logs.join(' ｜ '));
+    const back = runner.switchApi();
+    assert.strictEqual(back.useAlt, false);
+    assert.ok(/已切到主接口/.test(logs.join('\n')), logs.join(' ｜ '));
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
