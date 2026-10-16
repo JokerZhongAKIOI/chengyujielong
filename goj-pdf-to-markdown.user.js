@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.5.2
+// @version      2.6.0
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.5.2';
+  const VERSION = '2.6.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -158,6 +158,8 @@
     if (SKIP_TAGS.has(el.localName)) return true;
     if (el.hidden || el.getAttribute('aria-hidden') === 'true') return true;
     if (el.style && el.style.display === 'none') return true;
+    // 比赛结束后 Hydro 会在题面顶部插一句“该比赛已结束…”，那是站点的提示，不是题面
+    if (el.localName === 'blockquote' && /该比赛已结束|无法在比赛模式下递交/.test(el.textContent || '')) return true;
     return SKIP_CLASSES.some((c) => el.classList.contains(c));
   }
 
@@ -533,6 +535,75 @@
     const ctx = { pdfs: [], byUrl: new Map(), pdfLinks: [] };
     const markdown = tidy(walkChildren(root, ctx));
     return { markdown, pdfs: ctx.pdfs, pdfLinks: ctx.pdfLinks.filter((l) => !ctx.byUrl.has(l.url)) };
+  }
+
+  /* ---- 站点自己带的页面数据（题面原文） --------------------------------- */
+
+  /** 把 JS 字符串字面量里的转义还原成真字符（\" \n \u4e2d …）。 */
+  function unescapeJs(body) {
+    return body.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (all, esc) => {
+      if (esc[0] === 'u' || esc[0] === 'x') return String.fromCharCode(parseInt(esc.slice(1), 16));
+      return { n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', v: '\v', '0': '\0' }[esc] || esc;
+    });
+  }
+
+  /**
+   * Hydro 会把这一页的数据写进 window.UiContextNew（题目、题面原文、比赛信息都在里面）。
+   * 用户脚本带着 @grant 跑在沙箱里、读不到页面的 window，所以从 <script> 的文本里抠。
+   */
+  function pageData(doc) {
+    const scripts = doc.querySelectorAll('script');
+    let fallback = null;
+    for (let i = 0; i < scripts.length; i++) {
+      const text = scripts[i].textContent || '';
+      if (text.indexOf('UiContext') < 0) continue;
+      const m = /window\.(?:UiContextNew|UiContext)\s*=\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/.exec(text);
+      if (!m) continue;
+      const body = m[1].slice(1, -1);
+      let obj = null;
+      try { obj = JSON.parse(body); } catch (e) { /* 里面夹着 JS 自己的转义（\' 之类）时再还原一次 */ }
+      if (!obj) { try { obj = JSON.parse(unescapeJs(body)); } catch (e) { continue; } }
+      if (obj && (obj.pdoc || obj.tdoc)) return obj;        // 题面原文、比赛信息都在这个对象里，优先用它
+      if (!fallback) fallback = obj;
+    }
+    return fallback;
+  }
+
+  /**
+   * 页面数据里的题面原文（pdoc.content）。题面是 Markdown 时，这里就是带 $…$ 的源码 ——
+   * 比从渲染结果里扒可靠：站点怎么渲染（KaTeX / 套一层 / 只有一句 @[pdf](…)）都不影响它。
+   */
+  function statementFromPageData(doc) {
+    const data = pageData(doc);
+    const pdoc = data && data.pdoc;
+    if (!pdoc || typeof pdoc.content !== 'string') return null;
+    let md = pdoc.content.trim();
+    if (!md) return null;
+    if (md[0] === '{') {
+      try {                                             // Hydro 的多语言题面：{"zh":"…","en":"…"}
+        const obj = JSON.parse(md);
+        const keys = Object.keys(obj).filter((k) => typeof obj[k] === 'string');
+        const pick = keys.filter((k) => /^zh/i.test(k))[0] || keys[0];
+        if (pick) md = String(obj[pick]).trim();
+      } catch (e) { /* 不是多语言 JSON，就按原文用 */ }
+    }
+    return { markdown: md, pid: pdoc.pid || '', data };
+  }
+
+  /** 题面原文里写着的 PDF（Hydro 的 @[pdf](url)，或普通链接）：DOM 里没嵌 PDF 时用它兜底。 */
+  function pdfLinksFromMarkdown(md, base) {
+    const out = [];
+    const seen = new Set();
+    const re = /@\[\s*pdf\s*\]\(\s*([^)\s]+)|\[[^\]]*\]\(\s*([^)\s]+)/gi;
+    let m;
+    while ((m = re.exec(md))) {
+      let url = '';
+      try { url = new URL((m[1] || m[2]).replace(/^<|>$/g, ''), base).href; } catch (e) { continue; }
+      if (!/\.pdf(\?|#|$)/i.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      out.push({ url, name: pdfName(url), via: 'data' });
+    }
+    return out;
   }
 
   // opts.pageId：地址里的题号是数字 ID（题单里的链接常这样写）时，改用页面标题里的题号（“#TR0043. 题名”）
@@ -3077,12 +3148,21 @@
       const ex = extract(root);
       const meta = extractMeta(pdoc, ploc, o);
       let { markdown, pdfs } = ex;
-      // 题面几乎是空的、只放了一个指向 PDF 的链接：把那个 PDF 当作题面
-      if (!pdfs.length && ex.pdfLinks.length && markdown.replace(/\s+/g, '').length < SHORT_STATEMENT) {
-        pdfs = ex.pdfLinks;
+      // 站点数据里的题面原文：带 LaTeX 时直接用它（是从渲染结果里扒不出来的那种准）
+      const data = statementFromPageData(pdoc);
+      const dataPdfs = data ? pdfLinksFromMarkdown(data.markdown, ploc.href) : [];
+      let source = 'dom';
+      if (data && pageHasTex(data.markdown)) {
+        markdown = data.markdown;
+        source = 'data';
+      }
+      // 题面几乎是空的、只放了一个 PDF（嵌入的，或站点原文里 @[pdf](…) 指向的）：把那个 PDF 当作题面
+      const onlyPdf = !pdfs.length ? (dataPdfs.length ? dataPdfs : ex.pdfLinks) : [];
+      if (!pdfs.length && onlyPdf.length && markdown.replace(/\s+/g, '').length < SHORT_STATEMENT) {
+        pdfs = onlyPdf;
         markdown += pdfs.map((_, i) => `\n\n%%PDF:${i}%%`).join('');
       }
-      return { meta, markdown, pdfs, root };
+      return { meta, markdown, pdfs, root, source, dataPdf: dataPdfs[0] || null };
     }
 
     /** 依次识别题面里的每个 PDF。stopOnAuto：遇到“需要模型识别、自动模式不跑”时抛出（run 要据此整个跳过）；否则记成这个 PDF 失败。 */
@@ -3196,7 +3276,7 @@
       session = null;
       try {
         if (ui.picks) ui.picks(null, '');
-        const { meta, markdown, pdfs, root } = prepare(doc, loc);
+        const { meta, markdown, pdfs, root, source, dataPdf } = prepare(doc, loc);
         if (auto && !pdfs.length) {
           ui.state('idle', '📋 复制题面 Markdown');
           return { skipped: 'no-pdf' };
@@ -3207,11 +3287,18 @@
         const katexN = doc.querySelectorAll('.katex').length;
         const mjxN = doc.querySelectorAll('mjx-container, script[type^="math/tex"]').length;
         const hasTex = pageHasTex(markdown);
-        ui.log(`题面：${markdown.replace(/\s+/g, '').length} 字${hasTex ? '，含 LaTeX 公式' : '，没有公式源码'}`
+        const mdChars = markdown.replace(/\s+/g, '').length;
+        ui.log(`题面：${mdChars} 字${hasTex ? '，含 LaTeX 公式' : '，没有公式源码'}`
+          + `（来源：${source === 'data' ? '站点数据里的题面原文' : '页面 HTML'}）`
           + `${pdfs.length ? `；PDF ${pdfs.length} 份` : ''}（页面上的公式：KaTeX ${katexN} 处 ｜ MathJax ${mjxN} 处`
           + `${root ? `；题面区域：${rootHint(root)}` : ''}）`);
         // 题面里没有公式源码，但页面上明明有公式：多半是题面区域认错了——这行日志能直接看出问题在哪
         if (!hasTex && katexN + mjxN > 0) ui.log(`⚠️ 页面上有 ${katexN + mjxN} 处公式，但没有一处落在题面区域（${root ? rootHint(root) : '没找到'}）里，公式只能从 PDF 里补；请把这行日志发给作者`);
+        // 题面本身就是一个 PDF：页面上的“公式”是 PDF 里画出来的图，文字层里没有 —— 说清楚，别让人以为脚本没干活
+        else if (!hasTex && pdfs.length && mdChars < SHORT_STATEMENT) {
+          ui.log(`ℹ️ 这道题的题面本身就是一份 PDF（${dataPdf ? `站点原文里写着 @[pdf](${dataPdf.name})` : '题面里嵌着一份 PDF'}）：`
+            + '公式在 PDF 里是画出来的图形，文字层里没有 → 想要真 LaTeX 得配一个视觉模型（面板里点 🔑 配置，免费预设：智谱 GLM-4.6V-Flash）');
+        }
         let results;
         try {
           results = await readAll(pdfs, c, true);
@@ -3437,6 +3524,7 @@
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
     findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
     plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS, rootHint,
+    pageData, statementFromPageData, pdfLinksFromMarkdown, unescapeJs,
     looksLikeHtml, hashBytes, checkPdfBytes, pdfRefOf, isPdfUrl,
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,

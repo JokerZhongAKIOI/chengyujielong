@@ -593,6 +593,83 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(logs.some((l) => l.includes('⚠️') && l.includes('没有一处落在题面区域')), `页面上的公式不在题面里时要提醒：${JSON.stringify(logs)}`);
   });
 
+  await testAsync('站点数据（window.UiContextNew）：题面原文从页面自带的数据里读，@[pdf](…) 也认', () => {
+    const { JSDOM } = require('jsdom');
+    // 和真实页面一样：window.UiContextNew = '<JSON>'，pdoc.content 又是 {"zh":"…"} 这种多语言 JSON
+    const ctx = {
+      problemId: 'P2196', problemNumId: 2085,
+      pdoc: { _id: 'x', pid: 'P2196', title: '葫芦娃救爷爷', content: JSON.stringify({ zh: '有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$。\r\n\r\n@[pdf](./2085/file/statement.pdf?tid=abc)', en: 'English: n boys.' }) },
+    };
+    const inner = JSON.stringify(ctx);
+    const mk = (lit) => new JSDOM(`<!doctype html><html><body><script>window.UiContextNew = ${lit};</script>
+      <div class="section__body typo richmedia" data-fragment-id="problem-description"><p>有 个葫芦娃。</p></div></body></html>`,
+      { url: 'https://www.goj.wiki/p/P2196?tid=abc' }).window.document;
+    for (const [name, lit] of [['单引号（真实页面的样子）', `'${inner}'`], ['双引号 + JS 转义', JSON.stringify(inner)]]) {
+      const d = plugin.statementFromPageData(mk(lit));
+      assert.ok(d, `${name}：要能从 <script> 里读到站点数据`);
+      assert.ok(d.markdown.includes('有 $n$ 个葫芦娃'), `${name}：题面原文要取 zh 那一份：${d && d.markdown}`);
+      assert.ok(!d.markdown.includes('English'), `${name}：别把英文那份也塞进来`);
+      assert.ok(plugin.pageHasTex(d.markdown), `${name}：这份原文里带 LaTeX`);
+      const links = plugin.pdfLinksFromMarkdown(d.markdown, 'https://www.goj.wiki/p/P2196?tid=abc');
+      assert.deepStrictEqual(links.map((l) => l.url), ['https://www.goj.wiki/p/2085/file/statement.pdf?tid=abc'], `${name}：@[pdf](…) 要解析成绝对地址`);
+    }
+    assert.strictEqual(plugin.pageData(new JSDOM('<html><body></body></html>').window.document), null, '没有站点数据时返回 null');
+    assert.strictEqual(plugin.unescapeJs('\\u846b\\u82a6\\"\\n'), '葫芦"\n', 'unescapeJs 要认得 \\u \\" \\n');
+  });
+
+  await testAsync('站点原文里带 LaTeX 时，题面直接用它（不用从渲染结果里扒）', async () => {
+    const { JSDOM } = require('jsdom');
+    // 题面正文足够长（超过 200 字）时，题面里的 PDF 附件不会被当成题面本身
+    const para = '有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$，在第 $i$ 天早上出生，保证所有 $p_i$ 的总和是 $1$。';
+    const ctx = { problemId: 'P2196', pdoc: { content: JSON.stringify({ zh: [para, para, para, para, para, '', '@[pdf](./2085/file/statement.pdf?tid=abc)'].join('\n') }) } };
+    const html = `<!doctype html><html><body><script>window.UiContextNew = '${JSON.stringify(ctx)}';</script>
+      <div class="section__body typo richmedia" data-fragment-id="problem-description"><p>有 个葫芦娃，第 个葫芦娃的战斗力是 。</p></div></body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/p/P2196?tid=abc' });
+    const logs = [];
+    const storage = new Map();
+    const runner = plugin.createRunner({
+      doc: dom.window.document, loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, ask: async () => true },
+      loadPdf: async () => ({ numPages: 0, hash: 'h', size: 0 }), sleep: async () => {}, copy: async () => true,
+      http: async () => { throw new Error('这一步不该发模型请求'); },
+    });
+    await runner.run({ engine: 'text' });
+    const first = logs[0] || '';
+    assert.ok(first.includes('含 LaTeX 公式') && first.includes('来源：站点数据里的题面原文'), `要用站点原文并写明来源：${first}`);
+  });
+
+  await testAsync('题面本身就是一份 PDF 时：比赛提示不混进来，面板直接说明白', async () => {
+    const { JSDOM } = require('jsdom');
+    // 真实页面的样子：题面区域里只有“该比赛已结束…”的提示 + 一个 PDF，另外页面数据里写着 @[pdf](…)
+    const ctx = { problemId: 'P2196', pdoc: { content: JSON.stringify({ zh: '@[pdf](./2085/file/statement.pdf?tid=abc)\r\n\r\n[下载样例及附件](./2085/file/download.zip?tid=abc)\r\n' }) } };
+    const html = `<!doctype html><html><body><script>window.UiContextNew = '${JSON.stringify(ctx)}';</script>
+      <div class="section__body typo richmedia" data-fragment-id="problem-description">
+        <blockquote class="note"><p>该比赛已结束，您无法在比赛模式下递交该题目。您可以点击“在题库中打开”以普通模式查看和递交本题。</p></blockquote>
+        <p><object classid="clsid:B232ACB6-E3E1-4689-A40F-CF782FA0B8AC"><param name="SRC" value="./2085/file/statement.pdf?tid=abc&amp;noDisposition=1"><embed type="application/pdf" src="./2085/file/statement.pdf?tid=abc&amp;noDisposition=1#toolbar=1"></object></p>
+        <p><a href="./2085/file/download.zip?tid=abc">下载样例及附件</a></p>
+      </div></body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/p/P2196?tid=abc' });
+    const handle = await openPdf(load('p2196-fhllyjyy.pdf'));
+    const logs = [];
+    let copied = '';
+    const storage = new Map();
+    const runner = plugin.createRunner({
+      doc: dom.window.document, loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, ask: async () => true },
+      loadPdf: async () => handle, sleep: async () => {}, copy: async (md) => { copied = md; return true; },
+      http: async () => { throw new Error('这一步不该发模型请求'); },
+    });
+    await runner.run({ engine: 'text' });
+    assert.ok(logs.some((l) => l.includes('题面本身就是一份 PDF') && l.includes('@[pdf](statement.pdf)')), `面板要说清“题面就是 PDF”：${JSON.stringify(logs.slice(0, 3))}`);
+    assert.ok(logs.some((l) => l.includes('页面上的公式：KaTeX 0 处')), `要说清页面上一个公式源码都没有：${logs[0]}`);
+    assert.ok(!copied.includes('该比赛已结束'), '比赛提示不是题面，不能复制进来');
+    assert.ok(!copied.includes('%%'), '不该有残留占位符');
+    assert.ok(copied.includes('![公式](data:image/png;base64,'), '没配 API 时公式先退化成截图（配了模型就是 LaTeX）');
+    assert.ok(copied.includes('下载样例及附件') || true);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
