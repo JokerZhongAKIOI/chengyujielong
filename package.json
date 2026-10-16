@@ -1,0 +1,24 @@
+{
+  "name": "goj-pdf-to-markdown",
+  "version": "2.4.0",
+  "description": "GOJ（Hydro）题面 PDF 转 Markdown 的用户脚本，外加 Node 测试环境",
+  "private": true,
+  "scripts": {
+    "test": "node tools/test.cjs",
+    "harness": "node tools/harness.cjs",
+    "fixtures": "python3 tools/make_fixtures.py"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JokerZhongAKIOI/chengyujielong.git"
+  },
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/JokerZhongAKIOI/chengyujielong/issues"
+  },
+  "homepage": "https://github.com/JokerZhongAKIOI/chengyujielong#readme",
+  "devDependencies": {
+    "@napi-rs/canvas": "^1.0.11",
+    "pdfjs-dist": "^3.11.174"
+  }
+}
