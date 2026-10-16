@@ -560,6 +560,39 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(out.failed, 0);
   });
 
+  await testAsync('页面上的公式不在题面区域里时，面板要提醒一句（排查“扫不出 KaTeX”就看这一行）', async () => {
+    const { JSDOM } = require('jsdom');
+    const katex = (tex) => `<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>x</mi></mrow><annotation encoding="application/x-tex">${tex}</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base">x</span></span></span>`;
+    // 题面区域里只有 PDF 文字层那样“缺了公式”的文字，公式源码在题面区域外面（页面别处）
+    const html = `<!doctype html><html><body>
+      <div class="section__body typo richmedia" data-fragment-id="problem-description">
+        <h2>题目描述</h2>
+        <p>有 个葫芦娃，第 个葫芦娃的战斗力是 。</p>
+        <object data="/d/Union2024/p/2085/file/2085.pdf" type="application/pdf"><param name="SRC" value="/d/Union2024/p/2085/file/2085.pdf"></object>
+      </div>
+      <div class="problem-content"><p>页脚里也提到 ${katex('p_i')}。</p></div>
+      </body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/d/Union2024/p/2085' });
+    const handle = await openPdf(load('p2196-fhllyjyy.pdf'));
+    const logs = [];
+    const storage = new Map();
+    const runner = plugin.createRunner({
+      doc: dom.window.document,
+      loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, ask: async () => true },
+      loadPdf: async () => handle,
+      sleep: async () => {},
+      copy: async () => true,
+      http: async () => { throw new Error('这一步不该发模型请求'); },
+    });
+    await runner.run({ engine: 'text' });
+    const first = logs[0] || '';
+    assert.ok(/没有公式源码/.test(first) && /KaTeX 1 处/.test(first), `第一行要写清“题面里没有公式源码”和页面上的公式数：${first}`);
+    assert.ok(first.includes('题面区域：div[data-fragment-id="problem-description"]'), `要写出命中的题面容器：${first}`);
+    assert.ok(logs.some((l) => l.includes('⚠️') && l.includes('没有一处落在题面区域')), `页面上的公式不在题面里时要提醒：${JSON.stringify(logs)}`);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {

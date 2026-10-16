@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.5.1
+// @version      2.5.2
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.5.1';
+  const VERSION = '2.5.2';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -143,6 +143,15 @@
       if (el && (el.textContent.trim() || el.querySelector('img, embed, object, iframe'))) return el;
     }
     return null;
+  }
+
+  /** 把命中的题面容器写成一句人话（选择器 + 类名），用来打日志 / 排查别的站点。 */
+  function rootHint(el) {
+    if (!el || !el.localName) return '';
+    const id = el.id ? `#${el.id}` : '';
+    const frag = el.getAttribute && el.getAttribute('data-fragment-id');
+    const cls = String((el.className && el.className.baseVal) || el.className || '').trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.');
+    return `${el.localName}${id}${frag ? `[data-fragment-id="${frag}"]` : ''}${cls ? `.${cls}` : ''}`;
   }
 
   function isSkipped(el) {
@@ -3064,6 +3073,7 @@
     function prepare(pdoc, ploc, o) {
       const root = findStatementRoot(pdoc, o && o.strict);
       if (!root) throw new UserError('NO_ROOT', '没有找到题面区域：这个页面的结构可能和 Hydro 默认模板不同。');
+      // run 的日志里要写“题面区域是哪个容器”，方便对着页面看
       const ex = extract(root);
       const meta = extractMeta(pdoc, ploc, o);
       let { markdown, pdfs } = ex;
@@ -3072,7 +3082,7 @@
         pdfs = ex.pdfLinks;
         markdown += pdfs.map((_, i) => `\n\n%%PDF:${i}%%`).join('');
       }
-      return { meta, markdown, pdfs };
+      return { meta, markdown, pdfs, root };
     }
 
     /** 依次识别题面里的每个 PDF。stopOnAuto：遇到“需要模型识别、自动模式不跑”时抛出（run 要据此整个跳过）；否则记成这个 PDF 失败。 */
@@ -3186,7 +3196,7 @@
       session = null;
       try {
         if (ui.picks) ui.picks(null, '');
-        const { meta, markdown, pdfs } = prepare(doc, loc);
+        const { meta, markdown, pdfs, root } = prepare(doc, loc);
         if (auto && !pdfs.length) {
           ui.state('idle', '📋 复制题面 Markdown');
           return { skipped: 'no-pdf' };
@@ -3194,8 +3204,14 @@
 
         const cfg = loadConfig(storage);
         const c = { cfg, meta, force, auto, engine: engineOf(cfg, engine), statementText: markdown };
-        ui.log(`题面：${markdown.replace(/\s+/g, '').length} 字${pageHasTex(markdown) ? '，含 LaTeX 公式' : '，没有公式源码'}`
-          + `${pdfs.length ? `；PDF ${pdfs.length} 份` : ''}（KaTeX ${doc.querySelectorAll('.katex').length} 处 ｜ MathJax ${doc.querySelectorAll('mjx-container, script[type^="math/tex"]').length} 处）`);
+        const katexN = doc.querySelectorAll('.katex').length;
+        const mjxN = doc.querySelectorAll('mjx-container, script[type^="math/tex"]').length;
+        const hasTex = pageHasTex(markdown);
+        ui.log(`题面：${markdown.replace(/\s+/g, '').length} 字${hasTex ? '，含 LaTeX 公式' : '，没有公式源码'}`
+          + `${pdfs.length ? `；PDF ${pdfs.length} 份` : ''}（页面上的公式：KaTeX ${katexN} 处 ｜ MathJax ${mjxN} 处`
+          + `${root ? `；题面区域：${rootHint(root)}` : ''}）`);
+        // 题面里没有公式源码，但页面上明明有公式：多半是题面区域认错了——这行日志能直接看出问题在哪
+        if (!hasTex && katexN + mjxN > 0) ui.log(`⚠️ 页面上有 ${katexN + mjxN} 处公式，但没有一处落在题面区域（${root ? rootHint(root) : '没找到'}）里，公式只能从 PDF 里补；请把这行日志发给作者`);
         let results;
         try {
           results = await readAll(pdfs, c, true);
@@ -3420,7 +3436,7 @@
     VERSION, PROMPT, PRESETS, ROUTE_RE, LIST_ROUTE_RE, LIST_GAP_MS, AUTO_MAX_LIST, LIST_MAX_AI_PAGES, DEFAULT_CFG, ENGINES, CFG_KEY, CACHE_KEY, PROMPT_VERSION,
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
     findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
-    plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS,
+    plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS, rootHint,
     looksLikeHtml, hashBytes, checkPdfBytes, pdfRefOf, isPdfUrl,
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,

@@ -7,7 +7,7 @@ goj.wiki（Hydro）题目页上的用户脚本：把题面里嵌着的 PDF 认�
 - 纯函数测试环境：`npm install` 后 `npm test`（Node + pdf.js，跑的是脚本里的同一份代码）
 - 转换结果长什么样：[`docs/示例-2085-葫芦娃救爷爷.md`](docs/示例-2085-葫芦娃救爷爷.md)（28 处公式全部是 LaTeX，可以直接粘）
 
-## v2.5.1 修了什么
+## v2.5.2 修了什么
 
 ### 1. PDF 里的公式被“打印”成矢量图形时，整句缺公式
 
@@ -103,11 +103,14 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 跑的时候面板会记一行诊断，装好后看一眼就知道题面是从哪儿来的：
 
 ```
-题面：1234 字，含 LaTeX 公式；PDF 1 份（KaTeX 12 处 ｜ MathJax 0 处）
+题面：1234 字，含 LaTeX 公式；PDF 1 份（页面上的公式：KaTeX 12 处 ｜ MathJax 0 处；题面区域：div[data-fragment-id="problem-description"].section__body.typo）
 ```
 
-如果这行写的是「没有公式源码（KaTeX 0 处）」，说明页面上确实没有公式文字（公式是图片/扫描件），
-那就只能靠 PDF 那条路（配视觉模型 API）。
+- 写「没有公式源码（… KaTeX 0 处）」：页面上确实没有公式文字（公式是画出来的 / 在 PDF 里），
+  那就只能靠 PDF 那条路（配视觉模型 API）。
+- 写「没有公式源码」但页面上有公式（KaTeX / MathJax 不是 0 处）：多半是题面区域认错了，
+  面板会再补一句 `⚠️ 页面上有 N 处公式，但没有一处落在题面区域（…）里`，把这两行发给作者就能定位。
+- 写「含 LaTeX 公式」：公式直接来自页面，题面里嵌的重复 PDF 会被跳过。
 
 ## 安装
 
@@ -133,7 +136,7 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 27 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 28 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：
