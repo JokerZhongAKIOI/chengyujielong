@@ -7,7 +7,7 @@ goj.wiki（Hydro）题目页上的用户脚本：把题面里嵌着的 PDF 认�
 - 纯函数测试环境：`npm install` 后 `npm test`（Node + pdf.js，跑的是脚本里的同一份代码）
 - 转换结果长什么样：[`docs/示例-2085-葫芦娃救爷爷.md`](docs/示例-2085-葫芦娃救爷爷.md)（28 处公式全部是 LaTeX，可以直接粘）
 
-## v2.4.1 修了什么
+## v2.5.0 修了什么
 
 ### 1. PDF 里的公式被“打印”成矢量图形时，整句缺公式
 
@@ -75,6 +75,35 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 没配 API 时，右下角按钮会直接显示「🔑 已复制 · 28 处公式是截图，点这里转成 LaTeX」，
 点一下就能去填接口信息，回来再点一次即可。
 
+### 5. 题面页面里已经有 LaTeX 时，不再把同一份 PDF 又复制一遍
+
+有些题目的题面是 Markdown 写的（Hydro 用 KaTeX 渲染，公式是现成的 LaTeX），旁边另外挂了一份
+打印版 PDF。以前脚本会把两份都复制下来：题面是漂亮的 LaTeX，紧接着又多出一整份 PDF 的正文
+（公式是截图 / `![公式](data:image/png;base64,…)`），粘到题目输入框里全是噪声。
+
+现在会先比一比：**题面页面里已经有 LaTeX 公式**、而这份 PDF 的内容和它基本重合（按 6 字一组的
+字串算重合度，≥ 80% 就算同一份）时，就跳过这份 PDF —— 不裁图、不调 API、正文里也不留痕迹，
+只在面板里记一句「跳过：题面页面上已经有这一段」。题面还是英文、PDF 是中文这种“两份不一样”的
+情况不会误判，照旧两份都留。
+
+顺带把公式源码的来源补齐了（都能还原成 `$…$`）：
+
+| 页面里的样子 | 还原方式 |
+| --- | --- |
+| KaTeX（Hydro 默认） | `<annotation encoding="application/x-tex">` 里的源码 |
+| MathJax v2 | `<script type="math/tex">` 里的源码（`mode=display` 的自动独立成行） |
+| `data-tex` / `data-latex` / `data-formula` / `data-math` | 属性里的源码 |
+| `<img>` 的 `title` / `alt` 里就是源码（有些转换工具这样存） | 直接当公式，图不粘进来 |
+
+跑的时候面板会记一行诊断，装好后看一眼就知道题面是从哪儿来的：
+
+```
+题面：1234 字，含 LaTeX 公式；PDF 1 份（KaTeX 12 处 ｜ MathJax 0 处）
+```
+
+如果这行写的是「没有公式源码（KaTeX 0 处）」，说明页面上确实没有公式文字（公式是图片/扫描件），
+那就只能靠 PDF 那条路（配视觉模型 API）。
+
 ## 安装
 
 1. 装 Tampermonkey / Violentmonkey；
@@ -99,13 +128,15 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 22 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 26 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：
 node tools/harness.cjs tools/fixtures/p2196-fhllyjyy.pdf --engine text
 node tools/harness.cjs tools/fixtures/p2196-fhllyjyy.pdf --engine auto \
   --fake-ai "$(cat tools/fixtures/p2196-answers.json)"    # 用核对好的标准答案跑一遍完整流程
+node tools/harness.cjs tools/fixtures/p2196-fhllyjyy.pdf --engine auto --statement /tmp/题面.md
+                                                          # 模拟“题面页面里已经有 LaTeX”：这份 PDF 会被判为重复、跳过
 node tools/harness.cjs tools/fixtures/p2196-fhllyjyy.pdf --dump-pages      # 看每页检测到的公式洞
 DUMP_STRIP=/tmp/strip{n}.png node tools/harness.cjs …                      # 把交给模型的拼图存下来看
 ```

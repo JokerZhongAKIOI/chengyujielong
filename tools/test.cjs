@@ -385,6 +385,100 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     } finally { h.destroy(); }
   });
 
+  console.log('\n# 题面页面里已经有 LaTeX 时（KaTeX 渲染）');
+  await testAsync('页面 KaTeX → LaTeX，题面里嵌入的 PDF 记成占位符', () => {
+    const { JSDOM } = require('jsdom');
+    const katex = (tex, html) => `<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow>${html}</mrow><annotation encoding="application/x-tex">${tex}</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base">${html}</span></span></span>`;
+    const page = `<!doctype html><html><body>
+      <div class="problem-content"><div class="section__body typo richmedia" data-fragment-id="problem-description">
+        <h2>题目描述</h2>
+        <p>有 ${katex('n', 'n')} 个葫芦娃，第 ${katex('i', 'i')} 个葫芦娃的战斗力是 ${katex('p_i', 'p<sub>i</sub>')}，保证所有 ${katex('p_i', 'p<sub>i</sub>')} 的总和是 ${katex('1', '1')}。</p>
+        <object data="/d/Union2024/p/2085/file/2085.pdf" type="application/pdf"><param name="SRC" value="/d/Union2024/p/2085/file/2085.pdf"><embed type="application/pdf" src="/d/Union2024/p/2085/file/2085.pdf#toolbar=1"></object>
+      </div></div></body></html>`;
+    const dom = new JSDOM(page, { url: 'https://www.goj.wiki/d/Union2024/p/2085' });
+    const doc = dom.window.document;
+    const root = plugin.findStatementRoot(doc, false);
+    assert.ok(root, '要找到 Hydro 的题面容器');
+    const ex = plugin.extract(root);
+    assert.ok(ex.markdown.includes('有 $n$ 个葫芦娃'), `KaTeX 要还原成 LaTeX：${ex.markdown}`);
+    assert.ok(ex.markdown.includes('$p_i$'), `下标公式也要还原：${ex.markdown}`);
+    assert.strictEqual(ex.pdfs.length, 1, '嵌入的 PDF 仍然要记下来');
+    assert.ok(plugin.pageHasTex(ex.markdown), 'pageHasTex 要认出这段题面里有 LaTeX');
+    // 带占位符的题面拼上 PDF 的结果：重复的那份不留痕迹，正文是干净的 LaTeX
+    const meta = { title: '葫芦娃救爷爷', url: 'https://www.goj.wiki/d/Union2024/p/2085', pid: '2085', time: '1000ms', memory: '128MiB' };
+    const md = plugin.assemble(meta, ex.markdown, ex.pdfs, [{ ok: true, dup: true, markdown: '' }]);
+    assert.ok(md.includes('有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$'), `正文里要有 LaTeX 题面：${md}`);
+    assert.ok(!md.includes('data:image'), '不该带上 PDF 的截图');
+    assert.ok(!md.includes('%%'), '不该有残留的占位符');
+  });
+
+  await testAsync('dupOfStatement：判得出“PDF 和题面是同一份”，也判得出不是', () => {
+    const stmt = '有$n$个葫芦娃，第$i$个葫芦娃的战斗力是$p_i$，在第$i$天早上出生。保证所有$p_i$的总和是$1$。';
+    const fromPdf = '有 个葫芦娃，第 个葫芦娃的战斗力是 ，在第 天早上出生。保证所有 的总和是 。';
+    assert.strictEqual(plugin.overlapScore(fromPdf, stmt), 1, '同一段话（PDF 里公式是空格）应该完全重合');
+    assert.strictEqual(plugin.dupOfStatement(stmt, fromPdf).dup, true);
+    assert.strictEqual(plugin.dupOfStatement(fromPdf, fromPdf).dup, false, '题面页面里没有公式源码时，不能把 PDF 当重复（公式还得靠它）');
+    assert.strictEqual(plugin.dupOfStatement(stmt, 'Alice has three cats and two dogs.').dup, false, '内容不一样时不能跳过');
+    assert.strictEqual(plugin.pageHasTex('价格是 5 元'), false, '没有公式时不算有 LaTeX');
+  });
+
+  await testAsync('端到端：题面页面里已有 LaTeX 时，重复的 PDF 直接跳过（不裁图、不调 API）', async () => {
+    // 造一份“页面题面”：拿 PDF 的文字层，把每一处公式洞换成人工核对过的 LaTeX —— 就是题面页面渲染出来的样子
+    const key = JSON.parse(fs.readFileSync(path.join(FIX, 'p2196-answers.json'), 'utf8')).strip;
+    const lines = [];
+    let pdfText = '';
+    for (let n = 1; n <= p2196.numPages; n++) {
+      const p = await p2196.pageText(n);
+      const rows = new Map();
+      for (const sp of p.spans) {
+        pdfText += sp.str;
+        const k = Math.round(sp.y);
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push(sp);
+      }
+      for (const k of Array.from(rows.keys()).sort((a, b) => a - b)) {
+        lines.push(rows.get(k).sort((a, b) => a.x - b.x)
+          .map((sp) => (sp.hole == null ? sp.str : (key[String(n)][sp.hole] || '?'))).join(''));
+      }
+      lines.push('');
+    }
+    const statement = lines.join('\n');
+    assert.ok(plugin.pageHasTex(statement), '造出来的题面要含 LaTeX');
+    const d = plugin.dupOfStatement(statement, pdfText.replace(/%%H\d+-\d+%%/g, ' '));
+    assert.ok(d.dup, `应该判为和题面重复（重合度 ${d.score.toFixed(2)}）`);
+
+    const calls = [];
+    const r = await plugin.recognizePdf({
+      handle: p2196, engine: 'text', cfg: cfgWithApi(), title: '葫芦娃救爷爷', pid: 'P2196', auto: false,
+      statementText: statement, progress: () => {},
+    }, fakeDeps([({ want }) => { calls.push(want); return '# 不该被调用'; }], []));
+    assert.strictEqual(r.dup, true, '应该直接跳过');
+    assert.strictEqual(r.markdown, '', '跳过时不该产出任何正文');
+    assert.strictEqual(r.holeImgs, 0, '跳过时不该再裁公式截图');
+    assert.strictEqual(r.holeFixed, 0);
+    assert.strictEqual(calls.length, 0, '跳过时不该发任何模型请求');
+  });
+
+  await testAsync('公式源码的其他来源：MathJax 的 <script type="math/tex">、data-tex、图片 alt', () => {
+    const { JSDOM } = require('jsdom');
+    const page = `<!doctype html><html><body>
+      <div class="problem-content"><div class="section__body typo richmedia" data-fragment-id="problem-description">
+        <p>设 <script type="math/tex">n</script> 个葫芦娃，<span data-tex="p_i">图</span> 是战斗力，误差不超过 <img src="/x/f1.svg" alt="10^{-6}">，还有 <script type="math/tex; mode=display">\\sum p_i = 1</script></p>
+        <p><span data-tex="这里只是说明文字">abc</span></p>
+        <p><img src="/x/photo.png" alt="样例示意图"></p>
+      </div></div></body></html>`;
+    const dom = new JSDOM(page, { url: 'https://www.goj.wiki/d/Union2024/p/2085' });
+    const doc = dom.window.document;
+    const ex = plugin.extract(plugin.findStatementRoot(doc, false));
+    assert.ok(ex.markdown.includes('设 $n$ 个葫芦娃'), `MathJax v2 的源码脚本要变成 LaTeX：${ex.markdown}`);
+    assert.ok(ex.markdown.includes('$p_i$'), `data-tex 要变成 LaTeX：${ex.markdown}`);
+    assert.ok(ex.markdown.includes('$10^{-6}$'), `图片 alt 里的 LaTeX 要认出来：${ex.markdown}`);
+    assert.ok(ex.markdown.includes('$$') && ex.markdown.includes('\\sum p_i = 1'), `display 模式的源码要独立成行：${ex.markdown}`);
+    assert.ok(!ex.markdown.includes('这里只是说明文字'), '不像 LaTeX 的 data-tex 不能硬当公式');
+    assert.ok(/!\[样例示意图\]\(https:\/\/www\.goj\.wiki\/x\/photo\.png\)/.test(ex.markdown), `普通图片照旧（相对地址补成绝对）：${ex.markdown}`);
+    assert.ok(plugin.pageHasTex(ex.markdown), '这样得到的题面也算“含 LaTeX”');
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {

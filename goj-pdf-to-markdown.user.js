@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.4.1
+// @version      2.5.0
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.4.1';
+  const VERSION = '2.5.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -69,6 +69,8 @@
   const MAX_HOLES_DOC = 240;                // 一份 PDF 最多补多少个公式
   const HOLE_IMG_TOTAL = 400 * 1024;        // 用截图代替公式时，整份文档的 base64 上限
   const SHORT_STATEMENT = 200;              // 题面本身的文字少于此数时，才把“链接到 PDF 的附件”当作题面
+  const DUP_GRAM = 6;                       // 判断“这份 PDF 和页面上的题面是不是同一份”时用的字串长度
+  const DUP_SKIP_SCORE = 0.8;                // PDF 里多少内容在题面里出现过，就算重复（页面题面已带 LaTeX 时不再复制 PDF）
   const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/';   // 字符映射表 / 标准字体按需从这里取
   const ROUTE_RE = /^\/(?:d\/[^/]+\/)?(?:(?:contest|homework)\/[^/]+\/)?p\/[^/]+\/?$/;
   const LIST_ROUTE_RE = /^\/(?:d\/[^/]+\/)?training\/[0-9a-f]{24}\/?$/i;     // 题单（Hydro 的“训练”）详情页；训练 ID 是 24 位 ObjectId
@@ -202,8 +204,34 @@
   }
 
   // 题面里的普通图片（示意图等）：不做识别，原样保留成 Markdown 图片链接。
+  // 有的转换工具会把公式源码直接放在属性里（alt / title / data-tex…），见到就用它，比截图强。
+  const TEX_ATTRS = ['data-tex', 'data-latex', 'data-formula', 'data-math'];
+  function texAttrOf(el) {
+    for (const a of TEX_ATTRS) {
+      const v = el.getAttribute && el.getAttribute(a);
+      if (v && v.trim()) return v.trim();
+    }
+    return '';
+  }
+  /** 看着像 LaTeX 源码吗（有 \命令、_{} ^{} 或者整段用 $ 包着）。 */
+  const looksLikeTex = (v) => /\\[a-zA-Z]+|[_^]\{[^}]*\}|\$\$?[^$]+\$\$?/.test(String(v || ''));
+  /** 明确的“公式源码”属性（data-tex 这种）：允许不带花括号的下标，比如 p_i。 */
+  const isTexAttr = (v) => looksLikeTex(v) || /[_^]/.test(String(v || ''));
+
+  /** 一行 LaTeX → 行内 / 独立公式（去掉外面可能有的 $）。 */
+  function texMarkup(tex, display) {
+    const t = String(tex || '').trim().replace(/^\$\$?/, '').replace(/\$\$?$/, '').trim();
+    if (!t) return '';
+    return display || /\\begin\{|\\\\/.test(t) ? `\n\n$$\n${t}\n$$\n\n` : `$${t}$`;
+  }
+
   function imageToMd(el) {
     const src = imgSrc(el);
+    const attrTex = texAttrOf(el);
+    if (attrTex && isTexAttr(attrTex)) return texMarkup(attrTex);   // 图片只是公式的“照片”，源码就在属性里
+    for (const t of [el.getAttribute('title') || '', el.getAttribute('alt') || '']) {
+      if (looksLikeTex(t)) return texMarkup(t);
+    }
     if (!src || /^data:/i.test(src)) return '';
     const alt = (el.getAttribute('alt') || '').replace(/[[\]\n]/g, ' ').trim();
     return `![${alt}](${src})`;
@@ -346,10 +374,24 @@
       const ref = pdfRefOf(node);
       if (ref) return pdfToken(ref, ctx);
     }
-    if (node.nodeType !== 1 || isSkipped(node)) return '';
-    const el = node;
+    if (node.nodeType !== 1) return '';
+    const el0 = node;
+    // MathJax v2 把原始 LaTeX 留在 <script type="math/tex"> 里；脚本本身在 SKIP_TAGS 里，这里要先看一眼
+    if (el0.localName === 'script') {
+      const type = (el0.getAttribute('type') || '').toLowerCase();
+      if (/^math\/tex/.test(type)) {
+        const tex = el0.textContent.trim();
+        return tex ? texMarkup(tex, /mode\s*=\s*display/.test(type)) : '';
+      }
+    }
+    if (isSkipped(el0)) return '';
+    const el = el0;
     const tag = el.localName;
     const cl = el.classList;
+    if (!cl.contains('katex') && !cl.contains('katex-display') && !cl.contains('katex-error')) {
+      const attrTex = texAttrOf(el);
+      if (attrTex && isTexAttr(attrTex)) return texMarkup(attrTex);
+    }
 
     if (cl.contains('katex-display')) { const t = texOf(el); return t ? `\n\n$$\n${t}\n$$\n\n` : ''; }
     if (cl.contains('katex')) { const t = texOf(el); return t ? `$${t}$` : ''; }
@@ -387,6 +429,54 @@
         return BLOCK_TAGS.has(tag) ? `\n\n${inner}\n\n` : inner;
       }
     }
+  }
+
+  /**
+   * Markdown → 只留正文的字（去掉公式、图片、链接地址、标记符号和空白），用来比较两份文本是不是同一段题面。
+   * 例：`有 $n$ 个葫芦娃` 与 PDF 文字层里的 `有 个葫芦娃` 去完都是 `有个葫芦娃`。
+   */
+  function plainTextOf(md) {
+    return String(md == null ? '' : md)
+      .replace(/```[\s\S]*?```/g, ' ')                       // 代码块（样例）不参与比对
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')               // 图片
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')             // 链接只留文字
+      .replace(/\$\$[\s\S]*?\$\$/g, ' ')
+      .replace(/\$[^$\n]*\$/g, ' ')
+      .replace(/\\[()\[\]]/g, ' ')
+      .replace(/[^\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]+/g, '');
+  }
+
+  /** 一串字的 k 元组（用来量两份文本的重合度）。 */
+  function gramSet(text) {
+    const out = new Set();
+    const s = plainTextOf(text);
+    for (let i = 0; i + DUP_GRAM <= s.length; i++) out.add(s.slice(i, i + DUP_GRAM));
+    return out;
+  }
+
+  /** a 里有多少内容在 b 里出现过（0~1）。 */
+  function overlapScore(a, b) {
+    const ga = gramSet(a);
+    if (!ga.size) return 0;
+    const gb = gramSet(b);
+    let hit = 0;
+    for (const g of ga) if (gb.has(g)) hit++;
+    return hit / ga.size;
+  }
+
+  const PAGE_TEX_RE = /\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\(|\\\[/;
+  /** 页面题面里已经有 LaTeX 公式了吗（Hydro 用 KaTeX 渲染，可以从 <annotation> 还原出源码）。 */
+  const pageHasTex = (md) => PAGE_TEX_RE.test(String(md || ''));
+
+  /**
+   * 这份 PDF 是不是“题面页面里已经有的那一份”：页面题面带 LaTeX 公式、而 PDF 的内容和它基本重合时，
+   * 就不再复制 PDF 那一份——题面页面上的公式是现成的 LaTeX，PDF 那一份反而是截图 / 占位符，是噪声。
+   * 返回 { dup, score }（score = PDF 有多少内容在题面里出现过）。
+   */
+  function dupOfStatement(statementMd, pdfText) {
+    if (!pageHasTex(statementMd)) return { dup: false, score: 0 };
+    const score = overlapScore(pdfText, statementMd);
+    return { dup: score >= DUP_SKIP_SCORE, score };
   }
 
   /**
@@ -474,6 +564,7 @@
     const body = markdown.replace(/%%PDF:(\d+)(?:%%)?/g, (_, i) => {
       const r = results[Number(i)];
       const pdf = pdfs[Number(i)] || {};
+      if (r && r.ok && r.dup) return '';        // 题面页面里已经有这一份（含 LaTeX），不留痕迹
       const text = r && r.ok ? r.markdown : failureNote(pdf, r && r.error);
       return `\n\n${pdfs.length > 1 && pdf.name ? `## ${pdf.name}\n\n` : ''}${text}\n\n`;
     });
@@ -2654,6 +2745,21 @@
         pages[k - 1] = await handle.pageText(k);
       }
     }
+    // 题面页面里已经有这一段（带 LaTeX）时，这份 PDF 就不用再识别了：不裁图、不调 API、也不往正文里贴。
+    if (job.statementText && pages.some(Boolean)) {
+      // 公式洞在文字层里是占位符（%%H页-序号%%），比对前先去掉，免得影响重合度
+      const pdfText = pages.map((p) => (p && p.spans ? p.spans.map((x) => x.str).join('').replace(/%%H\d+-\d+%%/g, ' ') : '')).join('\n');
+      const { dup, score } = dupOfStatement(job.statementText, pdfText);
+      if (dup) {
+        return {
+          ok: true, dup: true, dupScore: score, markdown: '', body: '', rawBody: '',
+          holes: 0, holeFixed: 0, holeImgs: 0, pages: n, aiPages: 0, engine: 'text',
+          problems: [], best: -1, bestScore: 0, bestTitle: '', ties: false, truncated: false, notes: [],
+          statement: '页面题面里已经有这一段（含 LaTeX 公式），这份 PDF 的内容和它重复，就不再复制一遍了',
+        };
+      }
+    }
+
     const poor = pages.map((p) => needsAi(p));
     const poorList = poor.map((x, i) => (x ? i + 1 : 0)).filter(Boolean);
     const textList = pages.map((p, i) => (p && !poor[i] && !isBlankPage(p) ? i + 1 : 0)).filter(Boolean);
@@ -2933,9 +3039,15 @@
           force: c.force,
           auto: c.auto,
           aiHint: c.aiHint,
+          statementText: c.statementText,
           progress: (t) => busy(`${prefix}${t}`),
         }, deps);
-        if (r.holes) ui.log(`${ind}  公式补全：${r.holeFixed}/${r.holes} 处（${r.holeFixed ? '其余' : '这些'}是矢量图形，文字层里没有）`);
+        if (r.dup) {
+          // 这里只记面板日志：跳过的内容不留进正文（连注释也不加，免得又被当成“复制了一堆东西”）
+          ui.log(`${ind}  跳过：题面页面上已经有这一段（含 LaTeX 公式），这份 PDF 的内容和它重复（重合度 ${pct(r.dupScore)}）`);
+        } else if (r.holes) {
+          ui.log(`${ind}  公式补全：${r.holeFixed}/${r.holes} 处（${r.holeFixed ? '其余' : '这些'}是矢量图形，文字层里没有）`);
+        }
         return r;
       } finally {
         if (handle.destroy) handle.destroy();
@@ -3020,8 +3132,11 @@
       const copied = await deps.copy(md);
       const good = results.filter((r) => r.ok);
       const warn = failed.length > 0 || good.some((r) => r.truncated || r.pickWarn || (r.notes && r.notes.length));
-      const how = Array.from(new Set(good.map((r) => ENGINE_LABEL[r.engine]).filter(Boolean))).join('、');
-      const note = failed.length ? `（${failed.length} 个 PDF 失败）` : (warn ? '（有提示，见面板）' : '');
+      const used = good.filter((r) => !r.dup);                    // 被跳过的 PDF（题面里已有）不算一种识别方式
+      const how = Array.from(new Set(used.map((r) => ENGINE_LABEL[r.engine]).filter(Boolean))).join('、');
+      const dupN = good.filter((r) => r.dup).length;
+      const note = failed.length ? `（${failed.length} 个 PDF 失败）`
+        : (warn ? '（有提示，见面板）' : (dupN ? `（跳过 ${dupN} 份重复的 PDF）` : ''));
       // 公式退成了截图：把“配上 API 就能转成 LaTeX”直接说在按钮上，别让用户以为只能这样
       const imgCount = good.reduce((a, r) => a + (r.holeImgs || 0), 0);
       const noApi = configProblems(loadConfig(storage)).length > 0;
@@ -3072,7 +3187,9 @@
         }
 
         const cfg = loadConfig(storage);
-        const c = { cfg, meta, force, auto, engine: engineOf(cfg, engine) };
+        const c = { cfg, meta, force, auto, engine: engineOf(cfg, engine), statementText: markdown };
+        ui.log(`题面：${markdown.replace(/\s+/g, '').length} 字${pageHasTex(markdown) ? '，含 LaTeX 公式' : '，没有公式源码'}`
+          + `${pdfs.length ? `；PDF ${pdfs.length} 份` : ''}（KaTeX ${doc.querySelectorAll('.katex').length} 处 ｜ MathJax ${doc.querySelectorAll('mjx-container, script[type^="math/tex"]').length} 处）`);
         let results;
         try {
           results = await readAll(pdfs, c, true);
@@ -3159,7 +3276,7 @@
         const got = await fetchPage(link.url);
         const { meta, markdown, pdfs } = prepare(got.doc, got.loc, { strict: true, pageId: true });
         item.label = [meta.pid, meta.title].filter(Boolean).join(' ') || item.label;
-        const cc = Object.assign({}, c, { meta, label: `${tag} · ${shorten(meta.pid || meta.title, 14)} · `, indent: '  ' });
+        const cc = Object.assign({}, c, { meta, statementText: markdown, label: `${tag} · ${shorten(meta.pid || meta.title, 14)} · `, indent: '  ' });
         const results = await readAll(pdfs, cc, false);
         pickAll(results, cc);
         item.md = assemble(meta, markdown, pdfs, results);
@@ -3297,6 +3414,7 @@
     VERSION, PROMPT, PRESETS, ROUTE_RE, LIST_ROUTE_RE, LIST_GAP_MS, AUTO_MAX_LIST, LIST_MAX_AI_PAGES, DEFAULT_CFG, ENGINES, CFG_KEY, CACHE_KEY, PROMPT_VERSION,
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
     findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
+    plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE,
     looksLikeHtml, hashBytes, checkPdfBytes, pdfRefOf, isPdfUrl,
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,

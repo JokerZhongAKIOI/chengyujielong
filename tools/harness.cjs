@@ -146,12 +146,15 @@ async function makeHandle(bytes) {
 async function main() {
   const file = process.argv[2];
   if (!file) {
-    console.error('用法：node tools/harness.cjs <pdf> [--engine text|auto|ai] [--fake-ai json] [--out out.md]');
+    console.error('用法：node tools/harness.cjs <pdf> [--engine text|auto|ai] [--fake-ai json] [--statement 题面.md] [--out out.md]');
     process.exit(2);
   }
   const bytes = new Uint8Array(fs.readFileSync(file));
   const engine = arg('engine', 'auto');
   const fakeAi = JSON.parse(arg('fake-ai', '{}'));
+  // --statement 传一份“题面页面上的 Markdown”：模拟“页面题面里已经有 LaTeX、PDF 只是重复一份”的情况
+  const statementFile = arg('statement', '');
+  const statementText = statementFile ? fs.readFileSync(statementFile, 'utf8') : '';
   const logLines = [];
   const calls = [];
   const handle = await makeHandle(bytes);
@@ -202,10 +205,12 @@ async function main() {
     title: '葫芦娃救爷爷',
     pid: 'P2196',
     auto: false,
+    statementText,
     progress: (t) => logLines.push(`[进度] ${t}`),
   }, deps);
   console.log(logLines.join('\n'));
   console.log(`\n=========== 引擎：${out.engine}，AI 页数：${out.aiPages}，请求：${calls.join(',') || '无'} ===========`);
+  if (out.dup) console.log(`（这份 PDF 和题面重复：重合度 ${(out.dupScore * 100).toFixed(0)}%，已跳过，正文为空）`);
   if (out.notes && out.notes.length) console.log('提示：\n  ' + out.notes.join('\n  '));
   const outFile = arg('out', '');
   if (outFile) fs.writeFileSync(outFile, out.body, 'utf8');
