@@ -249,6 +249,34 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(r.problems.length >= 0);
   });
 
+  await testAsync('auto + 逐处补全：公式落到句子的正确位置（用人工核对过的标准答案）', async () => {
+    // tools/fixtures/p2196-answers.json 是照着原页面逐处核对出来的：改检测顺序、改编号映射都会在这里露馅
+    const key = JSON.parse(fs.readFileSync(path.join(FIX, 'p2196-answers.json'), 'utf8')).strip;
+    const byCount = { 19: key['1'], 9: key['2'] };
+    const logs = [];
+    const r = await plugin.recognizePdf({
+      handle: p2196, engine: 'auto', cfg: cfgWithApi(), title: '葫芦娃救爷爷', pid: 'P2196', auto: false, progress: () => {},
+    }, fakeDeps([({ isStrip, want }) => (isStrip
+      ? (byCount[want] || []).map((t, i) => `${i + 1}. ${t}`).join('\n')
+      : '')], logs));
+    assert.strictEqual(r.holes, 28);
+    assert.strictEqual(r.holeFixed, 28);
+    assert.strictEqual(r.holeImgs, 0, '都认出来了，不该有截图');
+    const want = [
+      '有$n$个葫芦娃，第$i$个葫芦娃的战斗力是$p_i$，在第$i$天早上出生。保证所有$p_i$的总和是$1$。',
+      '实力总和为$P$，那么有$P$的概率救出爷爷，$1-P$的概率失败',
+      '首先随机在$1$到$n$里均匀生成一个正整数$x$，然后在第$x$天中午杀死爷爷',
+      '**葫芦娃无法知道**$x$。',
+      '你的答案只要误差不超过$10^{-6}$就算对。',
+      '成功营救的概率就是$5/7$。',
+      '对于$30\\%$的数据，保证$n \\le 3$。',
+      '对于$100\\%$的数据，保证$n \\le 1000$。',
+      '保证输入的$\\sum p_i = 1$，小数点不超过$6$位。',
+    ];
+    for (const t of want) assert.ok(r.body.includes(t), `正文里少了这一段（或公式位置不对）：${t}`);
+    assert.ok(!r.body.includes('%%H') && !r.body.includes('[公式]'), '不该有占位符');
+  });
+
   await testAsync('text + 没配 API：公式退化成截图（而不是整句缺公式）', async () => {
     const logs = [];
     const r = await plugin.recognizePdf({
@@ -302,6 +330,59 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
       assert.strictEqual(stripCalls, 0, `不该为整页识别的页裁公式（裁了 ${stripCalls} 次）`);
       assert.ok(!r.body.includes('%%H'));
     } finally { p2196.holeStrip = orig; }
+  });
+
+  await testAsync('assemble：题面里的 %%PDF:n%% 全被替换掉，不留孤零零的 %%', () => {
+    const md = plugin.assemble({ title: 'T', url: 'u', time: '', memory: '' },
+      '题干\n\n%%PDF:0%%\n\n收尾', [{ name: 'a.pdf', url: 'x' }], [{ ok: true, markdown: 'PDF 正文' }]);
+    assert.ok(md.includes('PDF 正文'), '占位符应该被正文替换');
+    assert.ok(!md.includes('%'), `正文里不该再有 %：${JSON.stringify(md.slice(0, 200))}`);
+  });
+
+  await testAsync('没配 API 时的提示块是 HTML 注释（复制出去渲染是干净正文）', async () => {
+    const h = await openPdf(load('p2196-fhllyjyy.pdf'));
+    try {
+      const r = await plugin.recognizePdf({
+        handle: h, engine: 'text', cfg: { holeImages: true }, title: '葫芦娃救爷爷', pid: '2085', auto: false, progress: () => {},
+      }, fakeDeps([], []));
+      assert.ok(r.notes.length > 0, '应该有提示');
+      assert.ok(r.markdown.includes('<!--'), '提示应该写成 HTML 注释');
+      assert.ok(!/^\s*> ⚠️/m.test(r.markdown), '不该再是引用块形式（会出现在渲染结果里）');
+      assert.ok(r.markdown.length - r.body.length < 400, `提示不该占太多篇幅：${r.markdown.length - r.body.length} 字`);
+      assert.strictEqual(r.holeImgs, r.holes, '没给模型时，每一处都应该算作“退成了截图”');
+    } finally { h.destroy(); }
+  });
+
+  await testAsync('截图兜底：每张都裁到只剩公式本身（无大片空白、分辨率够高）', async () => {
+    const h = await openPdf(load('p2196-fhllyjyy.pdf'));
+    try {
+      await h.pageText(1);
+      const holes = h.getHoles(1);
+      const crops = await h.holeCrops(1, holes.map((_, i) => i));
+      assert.strictEqual(crops.length, holes.length, '每一处公式都要有一张图');
+      assert.ok(crops.every(Boolean), '不该出现整张全白、被丢掉的图');
+      for (const url of crops) {
+        const img = await napi.loadImage(url);
+        const c = napi.createCanvas(img.width, img.height);
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0);
+        const px = g.getImageData(0, 0, c.width, c.height).data;
+        let x0 = c.width; let y0 = c.height; let x1 = -1; let y1 = -1;
+        for (let y = 0; y < c.height; y++) {
+          for (let x = 0; x < c.width; x++) {
+            const i = (y * c.width + x) * 4;
+            if (px[i] < 240 || px[i + 1] < 240 || px[i + 2] < 240) {
+              if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+            }
+          }
+        }
+        assert.ok(x1 >= 0, '裁出来不能是纯白');
+        assert.ok(x0 <= 5 && y0 <= 5, `四周的空白要裁掉（左边 ${x0}px / 上边 ${y0}px 都是白的）`);
+        assert.ok(c.width - 1 - x1 <= 5 && c.height - 1 - y1 <= 5, `四周的空白要裁掉（右边 ${c.width - 1 - x1}px / 下边 ${c.height - 1 - y1}px 都是白的）`);
+        assert.ok(c.width * c.height >= 400, `图太小了：${c.width}x${c.height}`);
+        assert.ok(y1 - y0 >= 14, `字太小看不清（高 ${y1 - y0}px）`);
+      }
+    } finally { h.destroy(); }
   });
 
   console.log('\n# 静态检查');

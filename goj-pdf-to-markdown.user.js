@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.4.0
+// @version      2.4.1
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.4.0';
+  const VERSION = '2.4.1';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -60,8 +60,11 @@
   const HOLE_MIN_GAP = 0.6;                 // 文字行里的空隙宽于 0.6 倍字号，才可能藏着一个公式
   const HOLE_BOX_W = 4.5;                   // “字形大小”的矢量图形：宽 / 高不超过字号的若干倍（背景块、表格线、插图都超过）
   const HOLE_BOX_H = 3.2;
-  const HOLE_PAD_X = 0.2;                   // 裁图时左右留的空白（倍字号）：留太多会把旁边汉字裁进来
+  const HOLE_PAD_X = 0.2;                   // 交给模型的分块：左右留的白（倍字号），留太多会把旁边汉字裁进来
   const HOLE_PAD_Y = 0.8;
+  const HOLE_CROP_WIDTH = 2400;             // 截图兜底把整页渲染成多宽（像素）：比交给模型的拼图更清楚（约 4 倍）
+  const HOLE_CROP_PAD_X = 0.18;             // 截图四边留的白（倍字号）
+  const HOLE_CROP_PAD_Y = 0.12;
   const MAX_HOLES_PAGE = 40;                // 一页最多补多少个公式
   const MAX_HOLES_DOC = 240;                // 一份 PDF 最多补多少个公式
   const HOLE_IMG_TOTAL = 400 * 1024;        // 用截图代替公式时，整份文档的 base64 上限
@@ -468,7 +471,7 @@
 
   /** 把识别结果按占位符放回原位，拼上页眉。results[i] = {ok, markdown} | {ok:false, error} */
   function assemble(meta, markdown, pdfs, results) {
-    const body = markdown.replace(/%%PDF:(\d+)/g, (_, i) => {
+    const body = markdown.replace(/%%PDF:(\d+)(?:%%)?/g, (_, i) => {
       const r = results[Number(i)];
       const pdf = pdfs[Number(i)] || {};
       const text = r && r.ok ? r.markdown : failureNote(pdf, r && r.error);
@@ -2344,18 +2347,70 @@
     return { canvas, used };
   }
 
-  /** 只裁一个洞（识别不出时的截图兜底）。 */
+  /**
+   * 一个公式在页面上的裁剪范围：以图形 bbox 为准，上下再补到整行的字带
+   * （这样上下标、根号、求和号上下限不会被切掉），左右只留一点点，免得把旁边的汉字裁进来。
+   */
+  function holeCropBox(h) {
+    const S = h.S || 10;
+    const baseline = h.B;
+    const top = Number.isFinite(baseline) ? Math.min(h.y0, baseline - 0.88 * S) : h.y0;
+    const bot = Number.isFinite(baseline) ? Math.max(h.y1, baseline + 0.24 * S) : h.y1;
+    return {
+      x0: h.x0 - HOLE_CROP_PAD_X * S,
+      y0: top - HOLE_CROP_PAD_Y * S,
+      x1: h.x1 + HOLE_CROP_PAD_X * S,
+      y1: bot + HOLE_CROP_PAD_Y * S,
+    };
+  }
+
+  /** 把画布裁成“只剩有笔画的部分 + 一点白边”；整张几乎全白时返回 null。 */
+  function trimCanvas(canvas, margin) {
+    const g = canvas.getContext('2d');
+    let data;
+    try { data = g.getImageData(0, 0, canvas.width, canvas.height); } catch (e) { return canvas; }
+    const px = data.data;
+    let x0 = canvas.width; let y0 = canvas.height; let x1 = -1; let y1 = -1;
+    let ink = 0;
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const i = (y * canvas.width + x) * 4;
+        if (px[i] < 240 || px[i + 1] < 240 || px[i + 2] < 240) {          // 非白
+          ink++;
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (ink < 8 || x1 < x0 || y1 < y0) return null;
+    const m = margin == null ? 3 : margin;
+    const w = Math.min(canvas.width, x1 - x0 + 1 + 2 * m);
+    const h = Math.min(canvas.height, y1 - y0 + 1 + 2 * m);
+    const out = makeCanvas(w, h);
+    const g2 = out.getContext('2d');
+    g2.fillStyle = '#fff';
+    g2.fillRect(0, 0, w, h);
+    g2.drawImage(canvas, x0 - m, y0 - m, w, h, 0, 0, w, h);
+    canvas.width = 0;
+    canvas.height = 0;
+    return out;
+  }
+
+  /** 只裁一个洞（识别不出时的截图兜底）。返回画布数组，裁不出东西的位置是 null。 */
   async function holeCropCanvases(renderPage, holes, dims) {
     const out = [];
     if (!holes || !holes.length) return out;
     const w = (dims && dims.width) || 595;
-    const scale = Math.max(1.6, Math.min(3.6, HOLE_STRIP_WIDTH / w));
+    const scale = Math.max(2, Math.min(6, HOLE_CROP_WIDTH / w));
     const page = await renderPage(scale);
     for (const h of holes) {
-      const x0 = Math.max(0, Math.floor((h.x0 - HOLE_PAD_X * h.S) * scale));
-      const y0 = Math.max(0, Math.floor((h.y0 - HOLE_PAD_Y * h.S) * scale));
-      const x1 = Math.min(page.width, Math.ceil((h.x1 + HOLE_PAD_X * h.S) * scale));
-      const y1 = Math.min(page.height, Math.ceil((h.y1 + HOLE_PAD_Y * h.S) * scale));
+      const box = holeCropBox(h);
+      const x0 = Math.max(0, Math.floor(box.x0 * scale));
+      const y0 = Math.max(0, Math.floor(box.y0 * scale));
+      const x1 = Math.min(page.width, Math.ceil(box.x1 * scale));
+      const y1 = Math.min(page.height, Math.ceil(box.y1 * scale));
       const ww = Math.max(1, x1 - x0);
       const hh = Math.max(1, y1 - y0);
       const c = makeCanvas(ww, hh);
@@ -2363,7 +2418,11 @@
       g.fillStyle = '#fff';
       g.fillRect(0, 0, ww, hh);
       g.drawImage(page, x0, y0, ww, hh, 0, 0, ww, hh);
-      out.push(c);
+      try {
+        out.push(trimCanvas(c, 3));
+      } catch (e) {
+        out.push(c);
+      }
     }
     return out;
   }
@@ -2560,8 +2619,13 @@
   const needsAi = (p) => !!p && (p.garbled || (p.chars < MIN_PAGE_CHARS && (p.images > 0 || (p.vecBoxes || 0) >= 8)));
   const isBlankPage = (p) => !!p && p.chars === 0 && p.images === 0;
 
-  /** 末尾的提示块：每条一行 `> ⚠️ …`。 */
-  const notesBlock = (notes) => (notes && notes.length ? `\n\n${notes.map((t) => `> ⚠️ ${t}`).join('\n>\n')}` : '');
+  /**
+   * 末尾的提示块。写成 HTML 注释：复制出去的 Markdown 渲染出来是干净的正文，
+   * 提示只在源码里（面板的日志里也有一份）。
+   */
+  const notesBlock = (notes) => (notes && notes.length
+    ? `\n\n<!--\n${notes.map((t) => `⚠️ ${t}`).join('\n')}\n-->`
+    : '');
 
   /**
    * 识别一个 PDF，返回 { ok: true, markdown, engine: 'text'|'ai'|'mixed', pages, aiPages, notes, truncated, ... }。
@@ -2770,7 +2834,8 @@
       body,
       rawBody,
       holes: holeTotal,
-      holeFixed: holeTex,
+      holeFixed: holeTex,          // 转成 LaTeX 的处数
+      holeImgs: holeImg,           // 退成截图的处数
       problems: found.problems,
       best: found.best,
       bestScore: found.bestScore,
@@ -2957,8 +3022,18 @@
       const warn = failed.length > 0 || good.some((r) => r.truncated || r.pickWarn || (r.notes && r.notes.length));
       const how = Array.from(new Set(good.map((r) => ENGINE_LABEL[r.engine]).filter(Boolean))).join('、');
       const note = failed.length ? `（${failed.length} 个 PDF 失败）` : (warn ? '（有提示，见面板）' : '');
+      // 公式退成了截图：把“配上 API 就能转成 LaTeX”直接说在按钮上，别让用户以为只能这样
+      const imgCount = good.reduce((a, r) => a + (r.holeImgs || 0), 0);
+      const noApi = configProblems(loadConfig(storage)).length > 0;
+      const imgLabel = `${imgCount} 处公式是截图`;
       if (!copied) {
         ui.state('warn', '⚠️ 复制失败，点 👀 手动复制', '浏览器拒绝写入剪贴板：请点右侧 👀 打开面板，手动复制文本框里的内容');
+      } else if (imgCount && noApi && !failed.length) {
+        ui.state('needcfg', `🔑 已复制 · ${imgLabel}，点这里转成 LaTeX`,
+          '这些公式在 PDF 里是矢量图形（文字层里没有），要变成 LaTeX 得用视觉模型：点这里打开设置填好 API（有免费档），'
+          + '回来再点一次就会把公式重新识别成 LaTeX；不想用 API 的话，也可以在设置里把“识别不出的公式改用截图”关掉，改成 [公式] 占位');
+      } else if (imgCount && !failed.length && !warn) {
+        ui.state('warn', `⚠️ 已复制 · ${imgLabel}`, '这些公式没认出来（内容不对 / 输出被截断），已经用截图代替：可以点“AI 重新识别”再试一次');
       } else {
         ui.state(warn ? 'warn' : 'done', `${warn ? '⚠️' : '✅'} 已复制 · ${md.length} 字${how ? ` · ${how}` : ''}${target >= 0 ? pickLabel(results[target]) : ''}${note}`, '点击可重新识别并复制');
       }

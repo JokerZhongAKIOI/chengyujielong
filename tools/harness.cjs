@@ -3,9 +3,13 @@
  * 浏览器里跑的是同一份代码，这里只是把 pdf.js 和 canvas 换成 Node 版本。
  *
  *   node tools/harness.cjs <pdf> [--engine text|auto|ai] [--pages 1,2] [--strip out.png]
- *                            [--out out.md] [--fake-ai '{"1":["$n$"]}']  [--dump-pages]
+ *                            [--out out.md] [--dump-pages]
  *
- * --fake-ai 用一个假的 chat 回复来模拟视觉模型：{ "页码": ["第1块", "第2块", …] }。
+ * --fake-ai 用一个假的 chat 回复来模拟视觉模型：
+ *     {"strip": ["$n$", "$i$", …]}            —— 所有页共用（按编号顺序）
+ *     {"strip": {"1": […], "2": […]}}         —— 每页一套：页码 → 第 i 块 LaTeX
+ *     {"page": "整页正文"}                     —— 整页识别时返回的正文
+ *   现成的“标准答案”见 tools/fixtures/p2196-answers.json（人工核对过那份 PDF）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -166,7 +170,16 @@ async function main() {
       let text = '';
       if (isStrip) {
         const want = Number(/(\d+) 块/.exec(body.messages[0].content[0].text)[1]);
-        const list = fakeAi.strip || [];
+        // strip 可以是数组（所有页共用），也可以是 { "页码": [每块 LaTeX] }。
+        // 拼图请求里只有块数、没有页码，所以对象形式优先按“哪一页正好有这么多块”来选。
+        const all = fakeAi.strip;
+        let list = [];
+        if (Array.isArray(all)) list = all;
+        else if (all) {
+          const same = Object.keys(all).find((k) => Array.isArray(all[k]) && all[k].length === want);
+          const byPage = pageArg && all[pageArg[1]];
+          list = (same && all[same]) || (Array.isArray(byPage) ? byPage : []) || Object.values(all).find(Array.isArray) || [];
+        }
         for (let i = 1; i <= want; i++) text += `${i}. ${list[i - 1] || '?'}\n`;
       } else {
         text = fakeAi.page || '（假装这是模型转写出来的整页正文）';

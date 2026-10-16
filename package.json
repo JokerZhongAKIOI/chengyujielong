@@ -1,6 +1,6 @@
 {
   "name": "goj-pdf-to-markdown",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "description": "GOJ（Hydro）题面 PDF 转 Markdown 的用户脚本，外加 Node 测试环境",
   "private": true,
   "scripts": {
