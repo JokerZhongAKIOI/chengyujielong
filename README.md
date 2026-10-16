@@ -7,7 +7,7 @@ goj.wiki（Hydro）题目页上的用户脚本：把题面里嵌着的 PDF 认�
 - 纯函数测试环境：`npm install` 后 `npm test`（Node + pdf.js，跑的是脚本里的同一份代码）
 - 转换结果长什么样：[`docs/示例-2085-葫芦娃救爷爷.md`](docs/示例-2085-葫芦娃救爷爷.md)（28 处公式全部是 LaTeX，可以直接粘）
 
-## v2.6.0 修了什么
+## v2.7.0 修了什么
 
 ### 1. PDF 里的公式被“打印”成矢量图形时，整句缺公式
 
@@ -112,7 +112,22 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
   面板会再补一句 `⚠️ 页面上有 N 处公式，但没有一处落在题面区域（…）里`，把这两行发给作者就能定位。
 - 写「含 LaTeX 公式」：公式直接来自页面，题面里嵌的重复 PDF 会被跳过。
 
-### 6. 题面原文直接读站点数据；题面本身就是 PDF 时，面板会说明白
+### 6. 新增 DeepSeek 预设（想用 `deepseek-flash` 看图的话直接选它）
+
+设置面板的「快速填充」里多了 **DeepSeek**：接口地址 `https://api.deepseek.com/chat/completions`、
+模型名 `deepseek-flash`、自动关思考（`{"thinking":{"type":"disabled"}}`），选中时面板底部会把该预设的注意事项写出来。
+
+要点（都是官方文档里的硬性限制，填错了会直接报错）：
+
+* 官方**只有 `deepseek-flash` 一个模型能收图片**；`deepseek-v4-pro` / `deepseek-chat` 传图返回 HTTP 400；
+* 一张图无论多大，最多按 **1024 token** 计费，接口地址填 `https://api.deepseek.com` 也能用（脚本会补上 `/chat/completions`）；
+* 现在是**按 token 计费**（高峰 / 非高峰两档价），新账号可能带一笔赠送额度，以控制台余额为准 —— 当作“免费额度”用没问题，但别当成长期免费；
+* 想继续白嫖就用上面的「智谱 GLM-4.6V-Flash（免费）」预设。
+
+模型不吃图片时（把 DeepSeek 填成了文本模型、或换成别家的纯文本模型），报错会直接写成
+「这个模型不接受图片输入（HTTP 400）：… 得换成支持图片的模型：DeepSeek 用 deepseek-flash，智谱用 glm-4.6v-flash」。
+
+### 7. 题面原文直接读站点数据；题面本身就是 PDF 时，面板会说明白
 
 Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.content`，就是题面的**原文**）。
 脚本现在会先读它：
@@ -134,11 +149,26 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 > 页面上 KaTeX / MathJax 都是 0 处，PDF 里那 28 个公式是**画出来的矢量图形**，文字层里没有字符）。
 > 这种情况想拿到**真 LaTeX**（而不是截图）只能靠视觉模型，见下面「配一个免费的视觉模型」。
 
-#### 配一个免费的视觉模型（可选，但题面只有 PDF 时就需要）
+#### 配一个视觉模型（可选，但题面只有 PDF 时就需要）
+
+| 预设 | 模型 | 花钱吗 | 备注 |
+| --- | --- | --- | --- |
+| **智谱 GLM-4.6V-Flash（免费）** | `glm-4.6v-flash` | 免费 | **最省事**；同一个 Key 同时只能发 1 个请求，“并发数”填 1 |
+| **DeepSeek** | `deepseek-flash` | 按 token 计费，很便宜 | 官方接口；一张图最多 1024 token，转写时用的是关掉思考的 V4.1-Flash |
+| 硅基流动 SiliconFlow | 按平台文档 | 平台上有永久免费的视觉模型 | 模型名要自己填 |
+| OpenAI / Gemini | 按官方文档 | Gemini 有免费额度 | 模型名要自己填 |
+
+怎么配（以免费那条为例）：
 
 1. 到 [bigmodel.cn](https://open.bigmodel.cn/)（智谱开放平台）注册，控制台里新建一个 API Key；
 2. 题目页右下角点 `🔑 …`（或齿轮 → 设置），预设选「**智谱 GLM-4.6V-Flash（免费）**」，把 Key 粘进 `API Key`，保存；
 3. 回到题目页再点一次按钮。逐处公式会裁成小图交给模型，只补公式、不动正文。
+
+选用「**DeepSeek**」时：接口地址和模型名会自动填成 `https://api.deepseek.com/chat/completions` + `deepseek-flash`
+（`deepseek-v4-pro` / `deepseek-chat` **不能看图**，传图会返回 HTTP 400；脚本会直接把这句话翻译成“这个模型不接受图片输入，
+请换成 deepseek-flash”）。官方是按 token 扣费的，新账号可能带一笔赠送额度，具体以
+[platform.deepseek.com](https://platform.deepseek.com/) 控制台里的余额为准 —— 别把它当成长期免费额度。
+另外脚本已经替你关掉了思考模式（`{"thinking":{"type":"disabled"}}`），转写题面不需要想，关了更快更省。
 
 实测「葫芦娃救爷爷」：2 次请求（每页 1 次）、28/28 处公式变成 LaTeX，
 按钮显示 `✅ 已复制 · 1167 字 · 文字层 + 视觉模型`。结果见
@@ -168,7 +198,7 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 32 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 35 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：

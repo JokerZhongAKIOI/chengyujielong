@@ -693,6 +693,55 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(copied.includes('有 $n$ 个葫芦娃'), `正文要是站点原文里的 LaTeX：${copied}`);
   });
 
+  await testAsync('DeepSeek 预设：地址 / 模型名 / 关思考，base_url 只填域名也拼得对', async () => {
+    const ds = plugin.PRESETS.find((p) => p.id === 'deepseek');
+    assert.ok(ds, '要有 DeepSeek 预设');
+    assert.strictEqual(ds.apiUrl, 'https://api.deepseek.com/chat/completions');
+    assert.strictEqual(ds.model, 'deepseek-flash', '官方只有 deepseek-flash 支持图片，v4-pro 传图会 400');
+    assert.deepStrictEqual(JSON.parse(ds.extraBody), { thinking: { type: 'disabled' } });
+    assert.ok(/deepseek-flash/.test(ds.note) && /1024/.test(ds.note), '说明里要写清模型名和一张图的开销');
+    assert.strictEqual(plugin.normalizeEndpoint(ds.apiUrl), ds.apiUrl);
+    assert.strictEqual(plugin.normalizeEndpoint('https://api.deepseek.com'), 'https://api.deepseek.com/chat/completions');
+    assert.strictEqual(plugin.normalizeEndpoint('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions');
+  });
+
+  await testAsync('DeepSeek 请求：图片按 image_url 发出去，思考关掉，reasoning_content 不干扰解析', async () => {
+    const ds = plugin.PRESETS.find((p) => p.id === 'deepseek');
+    let sent = null;
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: ds.apiUrl, apiKey: 'sk-test', model: ds.model, extraBody: ds.extraBody });
+    const out = await plugin.chat(cfg, plugin.stripContent('data:image/png;base64,AAA', 2), {
+      sleep: async () => {},
+      http: async (opts) => {
+        sent = opts;
+        return { status: 200, text: JSON.stringify({ choices: [{ message: { reasoning_content: '（想一下）', content: '1. $n$\n2. $p_i$' }, finish_reason: 'stop' }] }) };
+      },
+    });
+    assert.strictEqual(sent.method, 'POST');
+    assert.strictEqual(sent.url, 'https://api.deepseek.com/chat/completions');
+    assert.strictEqual(sent.headers.Authorization, 'Bearer sk-test');
+    const body = JSON.parse(sent.data);
+    assert.strictEqual(body.model, 'deepseek-flash');
+    assert.deepStrictEqual(body.thinking, { type: 'disabled' });
+    assert.deepStrictEqual(body.messages[0].content[1], { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } });
+    assert.ok(/编号/.test(body.messages[0].content[0].text), '发的是逐块补公式的那套提示词');
+    assert.strictEqual(out.text, '1. $n$\n2. $p_i$');
+    assert.strictEqual(out.truncated, false);
+  });
+
+  await testAsync('模型不吃图片时：报错要说清是模型选错了，而不是让用户自己去猜', async () => {
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'https://api.deepseek.com/chat/completions', apiKey: 'sk-test', model: 'deepseek-v4-pro', extraBody: '' });
+    let msg = '';
+    try {
+      await plugin.chat(cfg, plugin.userContent('data:image/png;base64,AAA', 1, 1), {
+        sleep: async () => {},
+        http: async () => ({ status: 400, text: JSON.stringify({ error: { message: 'This model does not support image input' } }) }),
+      });
+    } catch (e) { msg = e.message; }
+    assert.ok(/不接受图片输入/.test(msg), `要说清是模型的问题：${msg}`);
+    assert.ok(/deepseek-flash/.test(msg), `要给出能用的模型名：${msg}`);
+    assert.ok(/HTTP 400/.test(msg), `要保留原始状态码：${msg}`);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
