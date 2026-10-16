@@ -7,7 +7,7 @@ goj.wiki（Hydro）题目页上的用户脚本：把题面里嵌着的 PDF 认�
 - 纯函数测试环境：`npm install` 后 `npm test`（Node + pdf.js，跑的是脚本里的同一份代码）
 - 转换结果长什么样：[`docs/示例-2085-葫芦娃救爷爷.md`](docs/示例-2085-葫芦娃救爷爷.md)（28 处公式全部是 LaTeX，可以直接粘）
 
-## v2.7.0 修了什么
+## v2.8.0 修了什么
 
 ### 1. PDF 里的公式被“打印”成矢量图形时，整句缺公式
 
@@ -112,7 +112,7 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
   面板会再补一句 `⚠️ 页面上有 N 处公式，但没有一处落在题面区域（…）里`，把这两行发给作者就能定位。
 - 写「含 LaTeX 公式」：公式直接来自页面，题面里嵌的重复 PDF 会被跳过。
 
-### 6. 新增 DeepSeek 预设（想用 `deepseek-flash` 看图的话直接选它）
+### 6. 新增 DeepSeek / OpenRouter 预设
 
 设置面板的「快速填充」里多了 **DeepSeek**：接口地址 `https://api.deepseek.com/chat/completions`、
 模型名 `deepseek-flash`、自动关思考（`{"thinking":{"type":"disabled"}}`），选中时面板底部会把该预设的注意事项写出来。
@@ -126,6 +126,19 @@ MATH_TRIGGER_RE / BULLET_CHARS / 界面文案里的 emoji    // 同上
 
 模型不吃图片时（把 DeepSeek 填成了文本模型、或换成别家的纯文本模型），报错会直接写成
 「这个模型不接受图片输入（HTTP 400）：… 得换成支持图片的模型：DeepSeek 用 deepseek-flash，智谱用 glm-4.6v-flash」。
+
+**OpenRouter** 也加上了：接口地址 `https://openrouter.ai/api/v1/chat/completions`，默认模型
+`nvidia/nemotron-3.5-super-vl:free`（免费、专门做视觉理解）。要点：
+
+* OpenRouter 的免费模型**ID 都以 `:free` 结尾**，余额 0 也能用，但**按次数限流**：约 20 次/分钟、**50 次/天**
+  （一次性充 10 美元后升到 1000 次/天）。一道题通常 1~2 次请求，日常够用；
+* 免费模型会轮换。要换模型时去 [openrouter.ai/models?max_price=0](https://openrouter.ai/models?max_price=0)
+  挑一个带 **Vision** 的，把 ID 粘进「模型名」（例如 `google/gemma-4-31b-it:free`）；
+* 有些模型默认开思考 —— 在「额外请求参数」里填 `{"reasoning":{"enabled":false}}` 关掉，转写题面不需要想；
+* 免费次数用完了会报「免费模型今天的次数用完了（HTTP 429）：…（默认约 50 次/天，一次性充 10 美元后升到 1000 次/天）」。
+
+> 选哪个？**纯白嫖优先智谱 GLM-4.6V-Flash（免费、不限次数、但并发 1）**；想多几个备选就用 OpenRouter 的 `:free`；
+> 不在意几毛钱、想要最稳的用 DeepSeek `deepseek-flash`。
 
 ### 7. 题面原文直接读站点数据；题面本身就是 PDF 时，面板会说明白
 
@@ -155,6 +168,7 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 | --- | --- | --- | --- |
 | **智谱 GLM-4.6V-Flash（免费）** | `glm-4.6v-flash` | 免费 | **最省事**；同一个 Key 同时只能发 1 个请求，“并发数”填 1 |
 | **DeepSeek** | `deepseek-flash` | 按 token 计费，很便宜 | 官方接口；一张图最多 1024 token，转写时用的是关掉思考的 V4.1-Flash |
+| **OpenRouter（免费视觉模型）** | `nvidia/nemotron-3.5-super-vl:free` | 免费（按次数限流） | 聚合平台；`:free` 模型约 50 次/天，模型会轮换，可自己换 |
 | 硅基流动 SiliconFlow | 按平台文档 | 平台上有永久免费的视觉模型 | 模型名要自己填 |
 | OpenAI / Gemini | 按官方文档 | Gemini 有免费额度 | 模型名要自己填 |
 
@@ -198,7 +212,7 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 35 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 38 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：

@@ -742,6 +742,63 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(/HTTP 400/.test(msg), `要保留原始状态码：${msg}`);
   });
 
+  await testAsync('OpenRouter 预设：填的是带 :free 的免费视觉模型，说明里写清限流和怎么换模型', async () => {
+    const or = plugin.PRESETS.find((p) => p.id === 'openrouter');
+    assert.ok(or, '要有 OpenRouter 预设');
+    assert.strictEqual(or.apiUrl, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.ok(/:free$/.test(or.model), `默认模型要选免费的（:free 结尾）：${or.model}`);
+    assert.ok(/Vision|vision/.test(or.note) || /max_price=0/.test(or.note), '要告诉用户去哪挑模型');
+    assert.ok(/50 次\/天/.test(or.note), '限流要写在说明里');
+    assert.strictEqual(plugin.normalizeEndpoint(or.apiUrl), or.apiUrl);
+    assert.strictEqual(plugin.normalizeEndpoint('https://openrouter.ai/api/v1'), 'https://openrouter.ai/api/v1/chat/completions');
+  });
+
+  await testAsync('OpenRouter 请求：图片按 image_url 发出去，响应里多出来的字段不影响解析', async () => {
+    const or = plugin.PRESETS.find((p) => p.id === 'openrouter');
+    let sent = null;
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: or.apiUrl, apiKey: 'sk-or-test', model: or.model, extraBody: or.extraBody });
+    const out = await plugin.chat(cfg, plugin.userContent('data:image/png;base64,AAA', 1, 1), {
+      sleep: async () => {},
+      http: async (opts) => {
+        sent = opts;
+        return {
+          status: 200,
+          text: JSON.stringify({
+            id: 'gen-abc', model: or.model, provider: 'NVIDIA',
+            choices: [{ message: { role: 'assistant', content: '## 题目描述\n\n有 $n$ 个葫芦娃。' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 1200, completion_tokens: 30 },
+          }),
+        };
+      },
+    });
+    assert.strictEqual(sent.url, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.strictEqual(sent.headers.Authorization, 'Bearer sk-or-test');
+    const body = JSON.parse(sent.data);
+    assert.strictEqual(body.model, or.model);
+    assert.deepStrictEqual(body.messages[0].content[1], { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } });
+    assert.ok(out.text.includes('有 $n$ 个葫芦娃'), out.text);
+    assert.strictEqual(out.truncated, false);
+  });
+
+  await testAsync('OpenRouter 免费额度用完时：报错要说清是「免费模型每天 50 次」', async () => {
+    const or = plugin.PRESETS.find((p) => p.id === 'openrouter');
+    const cfg = Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: or.apiUrl, apiKey: 'sk-or-test', model: or.model, extraBody: '' });
+    let calls = 0;
+    let msg = '';
+    try {
+      await plugin.chat(cfg, plugin.userContent('data:image/png;base64,AAA', 1, 1), {
+        sleep: async () => {},
+        http: async () => {
+          calls++;
+          return { status: 429, text: JSON.stringify({ error: { message: 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', code: 429 } }) };
+        },
+      });
+    } catch (e) { msg = e.message; }
+    assert.ok(/免费模型今天的次数用完了/.test(msg), `要说清是免费额度的问题：${msg}`);
+    assert.ok(/50 次\/天/.test(msg) && /10 美元/.test(msg), `要给出提升办法：${msg}`);
+    assert.strictEqual(calls, 3, '429 要退避重试 2 次再报错');
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.7.0
+// @version      2.8.0
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.7.0';
+  const VERSION = '2.8.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -89,6 +89,11 @@
     { id: 'deepseek', name: 'DeepSeek（deepseek-flash，能看图）', apiUrl: 'https://api.deepseek.com/chat/completions', model: 'deepseek-flash', extraBody: '{"thinking":{"type":"disabled"}}',
       note: '模型名必须是 deepseek-flash（DeepSeek-V4.1-Flash，官方唯一支持图片的模型）；deepseek-v4-pro / deepseek-chat 传图会报 400。'
         + '已关掉思考（转写不需要，还省 token）。按 token 计费，一张图最多 1024 token；新账号可能带一笔赠送额度，以 platform.deepseek.com 控制台为准。' },
+    { id: 'openrouter', name: 'OpenRouter（聚合平台，有免费的视觉模型）', apiUrl: 'https://openrouter.ai/api/v1/chat/completions', model: 'nvidia/nemotron-3.5-super-vl:free', extraBody: '',
+      note: 'OpenRouter 的免费模型 ID 都以 :free 结尾，默认填的是专门做视觉理解的 NVIDIA Nemotron 3.5 Super VL（免费）。'
+        + '免费额度按次数限流：约 20 次/分钟、50 次/天（一次性充 10 美元后升到 1000 次/天）。'
+        + '免费模型会轮换，可在 openrouter.ai/models?max_price=0 里挑一个带 Vision 的把模型名粘进来（如 google/gemma-4-31b-it:free）；'
+        + '若模型默认开思考，在“额外请求参数”里加 {"reasoning":{"enabled":false}}。' },
     { id: 'siliconflow', name: '硅基流动 SiliconFlow', apiUrl: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen2.5-VL-72B-Instruct', extraBody: '', note: '平台上有几个永久免费的视觉模型，模型名按平台文档填。' },
     { id: 'openai', name: 'OpenAI（模型名请按官方文档填写）', apiUrl: 'https://api.openai.com/v1/chat/completions', model: '', extraBody: '' },
     { id: 'gemini', name: 'Google Gemini（OpenAI 兼容，模型名请按官方文档填写）', apiUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', model: '', extraBody: '', note: '有免费额度（有速率限制），模型名按官方文档填。' },
@@ -2675,6 +2680,9 @@
     if (status === 0) return `网络错误或超时：${msg}（请检查接口地址能否访问；脚本管理器若弹出跨域访问确认，请选择“总是允许”）`;
     if (status === 401 || status === 403) return `认证失败（HTTP ${status}）：请检查 API Key 是否正确、是否有权调用该模型。${msg}`;
     if (status === 404) return `接口或模型不存在（HTTP 404）：请检查接口地址（应以 /chat/completions 结尾，或只填到 /v1）和模型名。${msg}`;
+    if (status === 429 && /free-models-per-day|free model|per-day/i.test(msg)) {
+      return `免费模型今天的次数用完了（HTTP 429）：${msg}（OpenRouter 的 :free 模型默认约 50 次/天，一次性充 10 美元后升到 1000 次/天；也可以换一个免费模型或换个服务商）`;
+    }
     if (status === 429) return `请求过于频繁或额度用尽（HTTP 429）：${msg}`;
     if (status === 400 && /(does not support image|不支持图片|support image input|image input)/i.test(msg)) {
       return `这个模型不接受图片输入（HTTP 400）：${msg}（转写公式要靠看图，得换成支持图片的模型：DeepSeek 用 deepseek-flash，智谱用 glm-4.6v-flash）`;
