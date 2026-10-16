@@ -3143,16 +3143,17 @@
     /** 题面 DOM → { meta, markdown（含 %%PDF:n%% 占位符）, pdfs }。当前页（run）和取回来的别的题目页（runList）共用。 */
     function prepare(pdoc, ploc, o) {
       const root = findStatementRoot(pdoc, o && o.strict);
-      if (!root) throw new UserError('NO_ROOT', '没有找到题面区域：这个页面的结构可能和 Hydro 默认模板不同。');
-      // run 的日志里要写“题面区域是哪个容器”，方便对着页面看
-      const ex = extract(root);
-      const meta = extractMeta(pdoc, ploc, o);
-      let { markdown, pdfs } = ex;
-      // 站点数据里的题面原文：带 LaTeX 时直接用它（是从渲染结果里扒不出来的那种准）
+      // 站点数据里的题面原文：带 LaTeX 时直接用它（是从渲染结果里扒不出来的那种准）；
+      // 页面结构不认识（别的模板）时，也能靠它把题面读出来，不至于直接报“找不到题面区域”。
       const data = statementFromPageData(pdoc);
       const dataPdfs = data ? pdfLinksFromMarkdown(data.markdown, ploc.href) : [];
-      let source = 'dom';
-      if (data && pageHasTex(data.markdown)) {
+      if (!root && !(data && data.markdown)) throw new UserError('NO_ROOT', '没有找到题面区域：这个页面的结构可能和 Hydro 默认模板不同。');
+      // run 的日志里要写“题面区域是哪个容器”，方便对着页面看
+      const ex = root ? extract(root) : { markdown: '', pdfs: [], pdfLinks: [] };
+      const meta = extractMeta(pdoc, ploc, o);
+      let { markdown, pdfs } = ex;
+      let source = root ? 'dom' : 'data';
+      if (data && (pageHasTex(data.markdown) || !root)) {
         markdown = data.markdown;
         source = 'data';
       }
@@ -3291,9 +3292,9 @@
         ui.log(`题面：${mdChars} 字${hasTex ? '，含 LaTeX 公式' : '，没有公式源码'}`
           + `（来源：${source === 'data' ? '站点数据里的题面原文' : '页面 HTML'}）`
           + `${pdfs.length ? `；PDF ${pdfs.length} 份` : ''}（页面上的公式：KaTeX ${katexN} 处 ｜ MathJax ${mjxN} 处`
-          + `${root ? `；题面区域：${rootHint(root)}` : ''}）`);
+          + `${root ? `；题面区域：${rootHint(root)}` : '；题面区域：没找到（这个模板和 Hydro 默认的不一样），题面读的是站点自己带的数据'}）`);
         // 题面里没有公式源码，但页面上明明有公式：多半是题面区域认错了——这行日志能直接看出问题在哪
-        if (!hasTex && katexN + mjxN > 0) ui.log(`⚠️ 页面上有 ${katexN + mjxN} 处公式，但没有一处落在题面区域（${root ? rootHint(root) : '没找到'}）里，公式只能从 PDF 里补；请把这行日志发给作者`);
+        if (!hasTex && katexN + mjxN > 0) ui.log(`⚠️ 页面上有 ${katexN + mjxN} 处公式，但没有一处落在题面区域（${rootHint(root)}）里，公式只能从 PDF 里补；请把这行日志发给作者`);
         // 题面本身就是一个 PDF：页面上的“公式”是 PDF 里画出来的图，文字层里没有 —— 说清楚，别让人以为脚本没干活
         else if (!hasTex && pdfs.length && mdChars < SHORT_STATEMENT) {
           ui.log(`ℹ️ 这道题的题面本身就是一份 PDF（${dataPdf ? `站点原文里写着 @[pdf](${dataPdf.name})` : '题面里嵌着一份 PDF'}）：`

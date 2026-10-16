@@ -123,6 +123,10 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 | 只有 `@[pdf](./2085/file/statement.pdf?tid=…)` 这一句 | 说明**这道题的题面本身就是一份 PDF**：把这份 PDF 当题面，面板里直说「题面本身就是一份 PDF」 |
 | 没有站点数据（别的站点 / 改了模板） | 照旧从页面 HTML 里提取 |
 
+反过来的情况也修了：**站点数据里有题面原文，但页面结构不是 Hydro 默认模板**（题面区域认不出来，
+以前会直接报「没有找到题面区域」）时，改用站点数据里的原文，照常导出。面板第一行会写成
+`…；题面区域：没找到（这个模板和 Hydro 默认的不一样），题面读的是站点自己带的数据`。
+
 顺便还修了两件小事：比赛结束时 Hydro 会在题面顶部插一句「该比赛已结束…」，那不是题面，不会再被复制；
 题面里的 PDF 链接（站点原文里的 `@[pdf](…)`）也能当 PDF 来源兜底，DOM 里没嵌 `<object>` 时也认得出来。
 
@@ -164,7 +168,7 @@ Hydro 会把这一页的数据写在页面里（`window.UiContextNew` → `pdoc.
 
 ```
 npm install          # pdfjs-dist（跟脚本里 @require 的版本一致）+ @napi-rs/canvas（Node 里渲染页面用）
-npm test             # 31 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
+npm test             # 32 个测试，覆盖矢量公式检测、版面、模型回复解析、端到端流程
 npm run fixtures     # 重新生成 tools/fixtures 下的测试 PDF（需要 python3 + reportlab）
 
 # 拿一份 PDF 直接跑整条链路（不需要浏览器）：

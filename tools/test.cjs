@@ -670,6 +670,29 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(copied.includes('下载样例及附件') || true);
   });
 
+  await testAsync('页面结构不认识的题面页，也能靠站点数据把题面读出来（不再直接报“找不到题面区域”）', async () => {
+    const { JSDOM } = require('jsdom');
+    const ctx = { problemId: 'T1', pdoc: { content: JSON.stringify({ zh: '有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$。' }) } };
+    const html = `<!doctype html><html><body><script>window.UiContextNew = '${JSON.stringify(ctx)}';</script>
+      <main class="brand-new-template"><p>有 个葫芦娃，第 个葫芦娃的战斗力是 。</p></main></body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/p/T1' });
+    const logs = [];
+    let copied = '';
+    const storage = new Map();
+    const runner = plugin.createRunner({
+      doc: dom.window.document, loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, ask: async () => true },
+      loadPdf: async () => { throw new Error('这个页面里没有 PDF，不该去读'); },
+      sleep: async () => {}, copy: async (md) => { copied = md; return true; },
+      http: async () => { throw new Error('这一步不该发模型请求'); },
+    });
+    await runner.run({ engine: 'text' });
+    assert.strictEqual(plugin.findStatementRoot(dom.window.document, false), null, '这个页面故意没有 Hydro 的题面容器');
+    assert.ok((logs[0] || '').includes('含 LaTeX 公式') && (logs[0] || '').includes('来源：站点数据里的题面原文'), `要靠站点数据：${logs[0]}`);
+    assert.ok(copied.includes('有 $n$ 个葫芦娃'), `正文要是站点原文里的 LaTeX：${copied}`);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
