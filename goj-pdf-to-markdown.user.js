@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.5.0
+// @version      2.5.1
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -41,7 +41,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.5.0';
+  const VERSION = '2.5.1';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -71,6 +71,7 @@
   const SHORT_STATEMENT = 200;              // 题面本身的文字少于此数时，才把“链接到 PDF 的附件”当作题面
   const DUP_GRAM = 6;                       // 判断“这份 PDF 和页面上的题面是不是同一份”时用的字串长度
   const DUP_SKIP_SCORE = 0.8;                // PDF 里多少内容在题面里出现过，就算重复（页面题面已带 LaTeX 时不再复制 PDF）
+  const DUP_MIN_CHARS = 20;                  // 正文太短就不判重了（几个字的题面比不出什么，误判了反而丢内容）
   const PDFJS_CDN = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/';   // 字符映射表 / 标准字体按需从这里取
   const ROUTE_RE = /^\/(?:d\/[^/]+\/)?(?:(?:contest|homework)\/[^/]+\/)?p\/[^/]+\/?$/;
   const LIST_ROUTE_RE = /^\/(?:d\/[^/]+\/)?training\/[0-9a-f]{24}\/?$/i;     // 题单（Hydro 的“训练”）详情页；训练 ID 是 24 位 ObjectId
@@ -154,9 +155,9 @@
   // KaTeX 渲染结果里带有 <annotation encoding="application/x-tex">，可以无损还原 LaTeX 源码。
   function texOf(el) {
     const a = el.querySelector('annotation[encoding="application/x-tex"]');
-    if (a) return a.textContent.trim();
-    const h = el.querySelector('.katex-html');
-    return (h || el).textContent.trim();
+    const raw = a ? a.textContent : (el.querySelector('.katex-html') || el).textContent;
+    // 个别站点把 $…$ 也写进 annotation，这里先脱掉外层定界符，免得又包一层变成 $$…$$
+    return String(raw || '').trim().replace(/^\$\$?/, '').replace(/\$\$?$/, '').trim();
   }
 
   function mark(inner, m) {
@@ -440,10 +441,13 @@
       .replace(/```[\s\S]*?```/g, ' ')                       // 代码块（样例）不参与比对
       .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')               // 图片
       .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')             // 链接只留文字
+      .replace(/%%[^%\n]*%%/g, ' ')                           // 插件自己的占位符（%%PDF:n%% / %%H页-序号%%）
       .replace(/\$\$[\s\S]*?\$\$/g, ' ')
       .replace(/\$[^$\n]*\$/g, ' ')
       .replace(/\\[()\[\]]/g, ' ')
-      .replace(/[^\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]+/g, '');
+      // 数字不要：样例数据在 PDF 里是一串散开的数字，在题面里却躺在代码块里（已经被上面删掉了），
+      // 留着只会把“同一份题面”误判成不重复。公式和样例都有别的机制处理，这里只比正文的字。
+      .replace(/[^\u3400-\u4dbf\u4e00-\u9fffA-Za-z]+/g, '');
   }
 
   /** 一串字的 k 元组（用来量两份文本的重合度）。 */
@@ -475,6 +479,7 @@
    */
   function dupOfStatement(statementMd, pdfText) {
     if (!pageHasTex(statementMd)) return { dup: false, score: 0 };
+    if (plainTextOf(statementMd).length + plainTextOf(pdfText).length < DUP_MIN_CHARS * 2) return { dup: false, score: 0 };
     const score = overlapScore(pdfText, statementMd);
     return { dup: score >= DUP_SKIP_SCORE, score };
   }
@@ -2758,6 +2763,7 @@
           statement: '页面题面里已经有这一段（含 LaTeX 公式），这份 PDF 的内容和它重复，就不再复制一遍了',
         };
       }
+      if (score > 0.2 && deps.ui && deps.ui.log) deps.ui.log(`  和题面重合度 ${Math.round(score * 100)}%，不像同一份，照旧识别`);
     }
 
     const poor = pages.map((p) => needsAi(p));
@@ -3414,7 +3420,7 @@
     VERSION, PROMPT, PRESETS, ROUTE_RE, LIST_ROUTE_RE, LIST_GAP_MS, AUTO_MAX_LIST, LIST_MAX_AI_PAGES, DEFAULT_CFG, ENGINES, CFG_KEY, CACHE_KEY, PROMPT_VERSION,
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
     findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
-    plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE,
+    plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS,
     looksLikeHtml, hashBytes, checkPdfBytes, pdfRefOf, isPdfUrl,
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,

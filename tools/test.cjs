@@ -419,6 +419,16 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(plugin.dupOfStatement(stmt, fromPdf).dup, true);
     assert.strictEqual(plugin.dupOfStatement(fromPdf, fromPdf).dup, false, '题面页面里没有公式源码时，不能把 PDF 当重复（公式还得靠它）');
     assert.strictEqual(plugin.dupOfStatement(stmt, 'Alice has three cats and two dogs.').dup, false, '内容不一样时不能跳过');
+    // 题面里带 %%PDF:n%% 占位符、样例数字在 PDF 里是一串散开的数字：不能因此判成不重复
+    const stmt2 = ['有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$，在第 $i$ 天早上出生。保证所有 $p_i$ 的总和是 $1$。',
+      '第 $i$ 天晚上，已经出生的葫芦娃可以选择积攒实力（等明天）或者所有人出发去救爷爷，如果这些葫芦娃的实力总和为 $P$，那么有 $P$ 的概率救出爷爷。',
+      '## 样例 #1', '### 样例输入 #1', '```', '1', '1', '```', '### 样例输出 #1', '```', '0', '```', '%%PDF:0%%'].join('\n');
+    const pdf2 = '葫芦娃救爷爷 rescue 题目描述 有 个葫芦娃，第 个葫芦娃的战斗力是 ，在第 天早上出生。保证所有 的总和是 。'
+      + '第 天晚上，已经出生的葫芦娃可以选择积攒实力（等明天）或者所有人出发去救爷爷，如果这些葫芦娃的实力总和为 ，那么有 的概率救出爷爷。'
+      + '样例 #1 样例输入 #1 1 1 样例输出 #1 0';
+    const d2 = plugin.dupOfStatement(stmt2, pdf2);
+    assert.ok(d2.dup, `占位符和样例数字不该影响判断（重合度 ${d2.score.toFixed(2)}）`);
+    assert.strictEqual(plugin.dupOfStatement('有 $a+b$。', '有 。').dup, false, '题面太短时不判重，免得误伤');
     assert.strictEqual(plugin.pageHasTex('价格是 5 元'), false, '没有公式时不算有 LaTeX');
   });
 
@@ -442,7 +452,16 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
       }
       lines.push('');
     }
-    const statement = lines.join('\n');
+    // 页面渲染出来的样子：公式两边带空格（标点前不留），样例数据在代码块里（PDF 文字层里它们却是散开的一行行数字），
+    // 题面里嵌的那份 PDF 在页面转换时留下 %%PDF:0%% 占位符 —— 这三点以前会把“同一份题面”拉到 0.76，判成不重复。
+    const isSampleData = (s) => /^[\d.\s]+$/.test(s) && /\d/.test(s);
+    const pageLines = [];
+    for (const ln of lines) pageLines.push(isSampleData(ln) ? ['```', ln.trim(), '```'] : ln);
+    const statement = pageLines.map((x) => (Array.isArray(x) ? x.join('\n') : x)).join('\n')
+      .replace(/(\$[^$\n]+\$)/g, ' $1 ')
+      .replace(/[ \t]+([，。、；：？！）】》])/g, '$1')
+      .replace(/ {2,}/g, ' ')
+      + '\n\n%%PDF:0%%';
     assert.ok(plugin.pageHasTex(statement), '造出来的题面要含 LaTeX');
     const d = plugin.dupOfStatement(statement, pdfText.replace(/%%H\d+-\d+%%/g, ' '));
     assert.ok(d.dup, `应该判为和题面重复（重合度 ${d.score.toFixed(2)}）`);
@@ -477,6 +496,68 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(!ex.markdown.includes('这里只是说明文字'), '不像 LaTeX 的 data-tex 不能硬当公式');
     assert.ok(/!\[样例示意图\]\(https:\/\/www\.goj\.wiki\/x\/photo\.png\)/.test(ex.markdown), `普通图片照旧（相对地址补成绝对）：${ex.markdown}`);
     assert.ok(plugin.pageHasTex(ex.markdown), '这样得到的题面也算“含 LaTeX”');
+  });
+
+  await testAsync('整个流程（页面 → 剪贴板）：题面里的 LaTeX 留下，重复的 PDF 不留痕、也不调模型', async () => {
+    const { JSDOM } = require('jsdom');
+    const katex = (tex) => `<span class="katex"><span class="katex-mathml"><math xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>x</mi></mrow><annotation encoding="application/x-tex">${tex}</annotation></semantics></math></span><span class="katex-html" aria-hidden="true"><span class="base">x</span></span></span>`;
+    // 页面题面 = PDF 的文字层 + 人工核对过的 LaTeX（就是 Hydro 用 KaTeX 渲染出来的样子）
+    const key = JSON.parse(fs.readFileSync(path.join(FIX, 'p2196-answers.json'), 'utf8')).strip;
+    const pageLines = [];
+    for (let n = 1; n <= p2196.numPages; n++) {
+      const p = await p2196.pageText(n);
+      const rows = new Map();
+      for (const sp of p.spans) {
+        const k = Math.round(sp.y);
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push(sp);
+      }
+      for (const k of Array.from(rows.keys()).sort((a, b) => a - b)) {
+        const line = rows.get(k).sort((a, b) => a.x - b.x)
+          .map((sp) => (sp.hole == null ? sp.str : katex(String(key[String(n)][sp.hole] || '?').replace(/^\$\$?|\$\$?$/g, '')))).join('');
+        pageLines.push(`<p>${line}</p>`);
+      }
+    }
+    const html = `<!doctype html><html><body><div class="problem-content"><div class="section__body typo richmedia" data-fragment-id="problem-description">
+      <h2>题目描述</h2>
+      ${pageLines.join('\n')}
+      <object data="/d/Union2024/p/2085/file/2085.pdf" type="application/pdf"><param name="SRC" value="/d/Union2024/p/2085/file/2085.pdf"><embed type="application/pdf" src="/d/Union2024/p/2085/file/2085.pdf#toolbar=1"></object>
+    </div></div></body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/d/Union2024/p/2085' });
+    const handle = await openPdf(load('p2196-fhllyjyy.pdf'));
+    const logs = [];
+    const states = [];
+    let copied = null;
+    let httpCalls = 0;
+    const storage = new Map();
+    const runner = plugin.createRunner({
+      doc: dom.window.document,
+      loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: {
+        log: (...a) => logs.push(a.join(' ')),
+        state: (kind, label, title) => states.push({ kind, label, title }),
+        result: () => {}, picks: () => {}, ask: async () => true,
+      },
+      loadPdf: async () => handle,
+      sleep: async () => {},
+      copy: async (md) => { copied = md; return true; },
+      http: async () => { httpCalls++; throw new Error('这一步不该发模型请求'); },
+    });
+    const out = await runner.run({});
+    assert.ok(copied, '应该复制了内容');
+    assert.ok(copied.includes('有 $n$个葫芦娃'), `正文里要有页面上的 LaTeX 题面：${copied.slice(0, 200)}`);
+    assert.ok(copied.includes('葫芦娃的战斗力是 $p_i$'), '公式要留在句子里');
+    assert.ok(copied.includes('$10^{-6}$'), '公式要保留成 LaTeX');
+    assert.ok(!copied.includes('data:image'), '不该有 PDF 的公式截图');
+    assert.ok(!copied.includes('%%'), '不该有残留占位符');
+    assert.strictEqual(httpCalls, 0, '不该发任何视觉模型请求');
+    assert.ok(logs.some((l) => l.includes('含 LaTeX 公式') && l.includes('KaTeX')), `要记一行题面来源诊断：${JSON.stringify(logs)}`);
+    assert.ok(logs.some((l) => l.includes('跳过')), '要说明这份 PDF 被跳过了');
+    const last = states[states.length - 1];
+    assert.strictEqual(last.kind, 'done', `不该报警告：${JSON.stringify(last)}`);
+    assert.ok(last.label.includes('跳过 1 份重复的 PDF'), `按钮上要说清楚：${JSON.stringify(last)}`);
+    assert.strictEqual(out.failed, 0);
   });
 
   console.log('\n# 静态检查');
