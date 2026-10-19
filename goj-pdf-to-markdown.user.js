@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.9.0
-// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型
+// @version      2.10.0
+// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接）
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
 // @match        *://www.goj.wiki/d/*/contest/*/p/*
@@ -32,6 +32,9 @@
  *      一份 PDF 里如果有多道题（比赛题面），按题名相似度只取与本题同名的那一道（面板里的下拉框可以改选，也可以取整份）；
  *   3. 把识别结果替换回占位符，拼上标题 / 时空限制，复制到剪贴板。
  *   4. 题单（训练）页：依次（每题间隔 0.5 秒）取回题单里每道题的页面，对每道题重复 1–3，合并成一份 Markdown 后复制。
+ *   5. （可选）搜原题：点面板里的“🔎 搜原题”，把转好的题面发给原题机 yuantiji.ac 的公开接口（Expert：
+ *      重写题面 + 跳过过短题面 + 重排），在面板里列出最像的 3 道：相似度（cos）、原题链接，
+ *      以及按 uid（Source/题号）拼出的 VJudge 链接。结果不会混进题面 Markdown，要复制用结果区的“复制结果”。
  *
  * 本文件被 Node 测试以 require() 方式加载时只导出纯函数（见文件末尾），不会触碰 DOM / GM_*。
  */
@@ -41,7 +44,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.9.0';
+  const VERSION = '2.10.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -81,9 +84,13 @@
   const LIST_MAX_AI_PAGES = 60;             // 手动复制题单时，整个题单最多让视觉模型识别的页数；用完后其余的题只读文字层
   const LIST_RETRIES = 2;                   // 取题面页遇到 429 / 5xx / 网络错误时的重试次数（退避 1 秒、2 秒）
   const ENGINES = ['auto', 'text', 'ai'];
+  const YUANTIJI_API = 'https://yuantiji.ac/api/search';   // 原题机（第三方公益站的公开接口，非官方承诺）：POST { query, k, rewrite, rerank, skip_short }
+  const YUANTIJI_K = 3;                                     // 搜原题只取最像的 3 道
+  const YUANTIJI_MAX_QUERY = 15000;                         // 接口限制 query 最长 16000 字，留点余量
+  const YUANTIJI_MIN_QUERY = 12;                            // 题面文字短于此数基本是没取到文字，搜了也是白搜
   const EMPTY_API = { apiUrl: '', apiKey: '', model: '', extraBody: '' };   // 一套接口（主 / 备用）
   // alt：备用接口（没配就是空壳）；useAlt：当前先用哪一套（两套都填好时可以来回切）
-  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', alt: null, useAlt: false, auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true };
+  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', alt: null, useAlt: false, auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true, findAuto: false };
 
   const PRESETS = [
     { id: 'zhipu', name: '智谱 GLM-4.6V-Flash（免费）', apiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4.6v-flash', extraBody: '{"thinking":{"type":"disabled"}}',
@@ -2830,6 +2837,219 @@
   }
 
   /* ====================================================================== *
+   * 4b. 搜原题（原题机 yuantiji.ac）：自动用 Expert 模式，取前 3 道
+   *
+   * 接口（线上 OpenAPI + 其开源 v2 后端源码核对过，2026-10）：
+   *   POST https://yuantiji.ac/api/search
+   *   请求 { query（≤16000 字）, k, rewrite, rerank, skip_short, sources? }
+   *   响应 { results: [{ uid: "Source/题号", title, src, url, cos, rr, base_rank,
+   *                      also: [{uid,url}], original, t0, t1 }], rewrites: {t0,t1} | null,
+   *          reranked, timing: {embed, rerank, total}, ... }
+   *   站点界面上的 Expert（高级）模式 = 可以自己开关 rewrite（先用模型把题面重写成
+   *   简洁描述再检索）/ skip_short（跳过过短题面）/ 按 OJ 筛选，并能再点一次 rerank
+   *   （用重排模型把候选重新排一遍）。这里一步到位：rewrite + skip_short + rerank 全开。
+   *   cos 是题面语义相似度（0~1），rr 是重排分数；results 已按最终顺序排好。
+   *   url 是原站的题目地址；VJudge 地址接口里没有，按 uid 的 Source/题号自己拼。
+   * ====================================================================== */
+
+  // VJudge 支持的 OJ（左边是我们拿它当键时用的“去掉大小写和符号”的写法，右边是 vjudge 地址里的名字）。
+  // 只收录题号能直接拼到 https://vjudge.net/problem/{OJ}-{题号} 的；不在表里的 OJ 就不给 VJudge 链接，免得给错链。
+  const VJUDGE_OJ = {
+    codeforces: 'CodeForces', cf: 'CodeForces', gym: 'Gym', codeforcesgym: 'Gym',
+    atcoder: 'AtCoder', codechef: 'CodeChef', spoj: 'SPOJ', poj: 'POJ', hdu: 'HDU', zoj: 'ZOJ',
+    uva: 'UVA', uvalive: 'UVALive', livearchive: 'UVALive', sgu: 'SGU', acmsguru: 'SGU',
+    ural: 'URAL', timus: 'URAL', aizu: 'Aizu', aoj: 'Aizu', lightoj: 'LightOJ',
+    kattis: 'Kattis', hackerrank: 'HackerRank', hysbz: 'HYSBZ', bzoj: 'BZOJ',
+    fzu: 'FZU', nbut: 'NBUT', csu: 'CSU', scu: 'SCU', uestc: 'UESTC', cdoj: 'UESTC',
+    libreoj: 'LibreOJ', loj: 'LibreOJ', qoj: 'QOJ', dmoj: 'DMOJ', baekjoon: 'Baekjoon', boj: 'Baekjoon',
+    cses: 'CSES', uoj: 'UniversalOJ', universaloj: 'UniversalOJ', eolymp: 'EOlymp', acdream: 'ACdream',
+    hust: 'HUST', hit: 'HIT', hrbust: 'HRBUST', openjudge: 'OpenJudge',
+    bailian: 'OpenJ_Bailian', openjbailian: 'OpenJ_Bailian', toph: 'Toph', csacademy: 'CSAcademy',
+    '51nod': '51Nod', hihocoder: 'HihoCoder', eijudge: 'EIJudge', topcoder: 'TopCoder',
+  };
+  const ojKey = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const safeUrl = (u) => { const t = String(u || '').trim(); return /^https?:\/\//i.test(t) ? t : ''; };
+
+  /** uid 形如 "CodeForces/1784C"（原题机语料里 uid 必须是 Source/ProblemId）。 */
+  function parseProblemUid(uid) {
+    const m = /^([^/]+)\/(.+)$/.exec(String(uid || '').trim());
+    return m ? { source: m[1].trim(), id: m[2].trim() } : null;
+  }
+
+  /** 按 uid 拼 VJudge 地址；CodeForces 比赛号 6 位起的是 Gym 题，在 VJudge 上挂在 Gym 下面。拼不出（OJ 不在 VJudge 上）就返回 ''。 */
+  function vjudgeUrlOf(source, id) {
+    const pid = String(id || '').trim();
+    let oj = VJUDGE_OJ[ojKey(source)] || '';
+    if (!oj || !pid) return '';
+    if (oj === 'CodeForces' && /^\d{6,}/.test(pid)) oj = 'Gym';
+    return `https://vjudge.net/problem/${oj}-${encodeURIComponent(pid)}`;
+  }
+
+  /** 防御用：万一某天接口返回的 url 变成了 VJudge 地址，再按 Source/题号尽量拼回原站地址（拼不出返回 ''）。 */
+  function originalUrlOf(source, id) {
+    const pid = String(id || '').trim();
+    if (!pid) return '';
+    const enc = encodeURIComponent(pid);
+    switch (ojKey(source)) {
+      case 'codeforces': case 'cf': {
+        const m = /^(\d+)([A-Za-z]\d?)$/.exec(pid);
+        if (!m) return '';
+        return Number(m[1]) >= 100000 ? `https://codeforces.com/gym/${m[1]}/problem/${m[2]}` : `https://codeforces.com/problemset/problem/${m[1]}/${m[2]}`;
+      }
+      case 'gym': case 'codeforcesgym': {
+        const m = /^(\d+)([A-Za-z]\d?)$/.exec(pid);
+        return m ? `https://codeforces.com/gym/${m[1]}/problem/${m[2]}` : '';
+      }
+      case 'atcoder': { const c = pid.split('_')[0]; return c && c !== pid ? `https://atcoder.jp/contests/${c}/tasks/${pid}` : ''; }
+      case 'poj': return `http://poj.org/problem?id=${enc}`;
+      case 'hdu': return `https://acm.hdu.edu.cn/showproblem.php?pid=${enc}`;
+      case 'spoj': return `https://www.spoj.com/problems/${enc}/`;
+      case 'codechef': return `https://www.codechef.com/problems/${enc}`;
+      case 'kattis': return `https://open.kattis.com/problems/${enc}`;
+      case 'hackerrank': return `https://www.hackerrank.com/challenges/${enc}/problem`;
+      case 'libreoj': case 'loj': return `https://loj.ac/p/${encodeURIComponent(pid.replace(/^#/, ''))}`;
+      case 'qoj': return `https://qoj.ac/problem/${enc}`;
+      case 'baekjoon': case 'boj': return `https://www.acmicpc.net/problem/${enc}`;
+      case 'cses': return `https://cses.fi/problemset/task/${enc}`;
+      case 'dmoj': return `https://dmoj.ca/problem/${enc}`;
+      case 'ural': case 'timus': return `https://acm.timus.ru/problem.aspx?space=1&num=${enc}`;
+      case 'aizu': case 'aoj': return `https://judge.u-aizu.ac.jp/onlinejudge/description.jsp?id=${enc}`;
+      case 'uoj': case 'universaloj': return `https://uoj.ac/problem/${enc}`;
+      default: return '';
+    }
+  }
+
+  const scoreOf = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : null; };
+  /** cos ≥ 0.85 基本就是同一道题（原题机官方消融和几个第三方客户端都拿 0.85 / 0.90 当阈值）。 */
+  const simLabel = (cos) => (cos == null ? '' : (cos >= 0.9 ? '几乎肯定是原题' : (cos >= 0.85 ? '很可能是原题' : '')));
+
+  /** 接口的一行结果 → 面板 / 复制用的规整结果（相似度以 cos 为准；url 是原题地址，VJudge 地址按 uid 拼）。 */
+  function normalizeFindRow(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const uid = String(raw.uid || '').trim();
+    const parsed = parseProblemUid(uid);
+    const src = String(raw.src || (parsed && parsed.source) || '').trim();
+    const title = String(raw.title || uid || '').trim();
+    if (!title && !uid) return null;
+    const cos = scoreOf(raw.cos);
+    const rr = scoreOf(raw.rr);
+    const url = safeUrl(raw.url);
+    let origUrl = '';
+    let vjUrl = '';
+    if (/vjudge\.net\/problem\//i.test(url)) {           // url 本身就是 VJudge（防御分支，现在不该发生）
+      vjUrl = url;
+      if (parsed) origUrl = originalUrlOf(parsed.source, parsed.id);
+    } else {
+      origUrl = url;
+      if (parsed) vjUrl = vjudgeUrlOf(parsed.source, parsed.id);
+    }
+    const also = (Array.isArray(raw.also) ? raw.also : [])
+      .map((a) => { const au = String((a && a.uid) || '').trim(); return au ? { uid: au, url: safeUrl(a && a.url) } : null; })
+      .filter(Boolean).slice(0, 4);
+    return {
+      uid, title: title || uid, src, cos, rr, sim: cos != null ? cos : rr, origUrl, vjUrl, also,
+      snip: String(raw.t0 || raw.original || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+    };
+  }
+
+  function parseYuantijiResponse(text) {
+    let j;
+    try { j = JSON.parse(text); } catch (e) { throw new Error(`原题机返回的不是 JSON：${String(text).slice(0, 160)}`); }
+    if (!j || !Array.isArray(j.results)) throw new Error('原题机返回里没有 results（这个第三方接口可能改版了，可以打开 yuantiji.ac 手动搜）');
+    return {
+      rows: j.results.map(normalizeFindRow).filter(Boolean).slice(0, YUANTIJI_K),
+      reranked: !!j.reranked,
+      rewrites: (j.rewrites && typeof j.rewrites === 'object') ? j.rewrites : null,
+      timing: (j.timing && typeof j.timing === 'object') ? j.timing : {},
+    };
+  }
+
+  /** FastAPI 的 422 把错误放在 detail 数组里，现成的 errorMessage 处理不了。 */
+  function yuantijiErrorMessage(text) {
+    try {
+      const j = JSON.parse(String(text || ''));
+      if (j && Array.isArray(j.detail)) return j.detail.map((d) => (d && d.msg) || '').filter(Boolean).join('；').slice(0, 200);
+      if (j && typeof j.detail === 'string') return j.detail;
+    } catch (e) { /* 不是 JSON，走通用解析 */ }
+    return errorMessage(text);
+  }
+
+  function describeYuantijiError(status, msg) {
+    if (status === 0) return `连不上原题机（yuantiji.ac）：${msg || '网络错误或超时'}（公益站偶尔会挂，稍后再试，或打开 https://yuantiji.ac 手动粘题面搜）`;
+    if (status === 422) return `原题机拒绝了这次搜索（HTTP 422）：${msg}（多半是题面超过 16000 字）`;
+    if (status === 429) return `原题机被限流了（HTTP 429），过一会儿再试${msg ? `：${msg}` : ''}`;
+    if (status >= 500) return `原题机服务暂时不可用（HTTP ${status}）：${msg}（稍后再试，或打开 https://yuantiji.ac 看看）`;
+    return `原题机返回 HTTP ${status}：${msg}`;
+  }
+
+  /**
+   * 发一次 Expert 搜索：rewrite（重写题面）+ skip_short（跳过过短题面）+ rerank（重排）全开，取前 YUANTIJI_K 道。
+   * 一次搜索在对方那边要跑重写模型 + 嵌入 + 重排，通常十几秒；网络 / 5xx / 429 只重试一次，不要连点。
+   * deps = { http({method,url,headers,data,timeout}) → {status,text}, sleep, ui? }。
+   */
+  async function searchYuantiji(query, deps) {
+    const data = JSON.stringify({ query, k: YUANTIJI_K, rewrite: true, rerank: true, skip_short: true });
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await deps.http({
+        method: 'POST',
+        url: YUANTIJI_API,
+        timeout: 180000,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        data,
+      });
+      if (res.status >= 200 && res.status < 300) return parseYuantijiResponse(res.text);
+      lastErr = new Error(describeYuantijiError(res.status, yuantijiErrorMessage(res.text)));
+      if (!(res.status === 0 || res.status === 429 || res.status >= 500) || attempt > 0) break;
+      if (deps.ui && deps.ui.log) deps.ui.log('原题机这次没响应，3 秒后重试一次……');
+      await deps.sleep(3000);
+    }
+    throw lastErr || new Error('原题机没有响应');
+  }
+
+  /**
+   * 把转好的题面 Markdown 清成拿去检索的文本：去掉我们拼的页眉（题名单独放在最前面）、
+   * 识别失败提示、HTML 注释（notesBlock）、图片（尤其是几百 KB 的 base64 公式截图——
+   * 又长又会把 16000 字的额度吃光）和没被替换掉的 %%PDF:n%% 占位符；公式 $…$ 原样保留。
+   */
+  function buildSearchQuery(md, meta) {
+    let s = String(md || '')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ');
+    s = s.split('\n').filter((ln, i) => {
+      const t = ln.trim();
+      if (i < 3 && /^#\s/.test(t)) return false;        // 我们拼的标题行
+      if (/^>\s*来源/.test(t)) return false;            // 页眉：来源 / 时空限制
+      if (/^>\s*⚠️/.test(t)) return false;             // 识别失败的提示行
+      if (/%%PDF:\d+%%/.test(t)) return false;          // 还没识别的 PDF 占位符
+      return true;
+    }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    const title = meta && meta.title ? String(meta.title).trim() : '';
+    if (title && !s.includes(title)) s = `${title}\n\n${s}`;
+    if (s.length > YUANTIJI_MAX_QUERY) s = s.slice(0, YUANTIJI_MAX_QUERY);
+    return s.trim();
+  }
+
+  /** 搜原题的结果拼成 Markdown（面板里“复制结果”用的；不会自动混进题面里去）。 */
+  function findResultsMarkdown(rows, meta) {
+    const pctOf = (v) => (v == null ? '?' : `${Math.round(v * 100)}%`);
+    const whoText = meta && meta.title && meta.pid && String(meta.title).startsWith(meta.pid) ? meta.title : (meta ? [meta.pid, meta.title].filter(Boolean).join(' ') : '');
+    const who = whoText ? `（${whoText}）` : '';
+    const items = rows.map((r, i) => {
+      const bits = [`相似度 ${pctOf(r.sim)}`];
+      if (r.cos != null && r.rr != null) bits.push(`cos ${r.cos.toFixed(3)} · 重排 ${r.rr.toFixed(3)}`);
+      bits.push(r.uid || r.src);
+      if (simLabel(r.cos)) bits.push(simLabel(r.cos));
+      const links = [];
+      if (r.origUrl) links.push(`[原题](${r.origUrl})`);
+      if (r.vjUrl) links.push(`[VJudge](${r.vjUrl})`);
+      const main = r.origUrl ? `[${r.title}](${r.origUrl})` : r.title;
+      return `${i + 1}. ${main}（${bits.filter(Boolean).join('，')}）${links.length ? `\n   ${links.join(' ｜ ')}` : ''}`;
+    });
+    return `## 原题搜索${who}\n\n${items.join('\n')}\n\n> 数据来自原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），取最像的 ${rows.length} 道；相似度是题面的语义相似度（cos），点开链接核对后再下结论。\n`;
+  }
+
+  /* ====================================================================== *
    * 5. PDF 识别：校验 → 文字层（默认）/ 视觉模型（可选，扫描件用）
    * ====================================================================== */
   function pdfStart(u8) {
@@ -3174,6 +3394,8 @@
     let cancelled = false;        // 题单复制被要求停止
     let last = '';
     let session = null;
+    let finding = false;          // 正在搜原题
+    let lastFindAt = 0;           // 上次搜原题的时间（两次至少隔 3 秒，对公益站客气一点）
     const ENGINE_LABEL = { text: '文字层', ai: '视觉模型', mixed: '文字层 + 视觉模型' };
     const pct = (x) => `${Math.round(x * 100)}%`;
     const shorten = (t, k) => { const a = Array.from(String(t)); return a.length > k ? `${a.slice(0, k - 1).join('')}…` : a.join(''); };
@@ -3352,6 +3574,7 @@
       session = null;
       try {
         if (ui.picks) ui.picks(null, '');
+        if (ui.found) ui.found(null);
         const { meta, markdown, pdfs, root, source, dataPdf } = prepare(doc, loc);
         if (auto && !pdfs.length) {
           ui.state('idle', '📋 复制题面 Markdown');
@@ -3492,6 +3715,7 @@
       let pool = null;
       try {
         if (ui.picks) ui.picks(null, '');
+        if (ui.found) ui.found(null);
         const cfg = loadConfig(storage);
         const links = collectProblemLinks(doc, loc);
         const total = links.length;
@@ -3602,7 +3826,77 @@
       return { useAlt: cfg.useAlt, label: a.label, model: a.model };
     }
 
-    return { run, runList, cancel, repick, testConnection, switchApi, getLast: () => last, isBusy: () => running };
+    /**
+     * 搜原题：把本题题面发给原题机 yuantiji.ac（自动 Expert：重写题面 + 跳过过短题面 + 重排），
+     * 在面板里列出最像的前 3 道（相似度 + 原题链接 + VJudge 链接）。全程不改剪贴板、不影响题面转写的状态。
+     * 题面还没转写过、而正文在 PDF 里时，先只读文字层把题面取出来（不调用视觉模型）。
+     */
+    async function searchOriginal() {
+      if (finding) return { skipped: 'busy' };
+      if (running) { ui.log('正在转写题面，等它完了再点“🔎 搜原题”'); return { skipped: 'busy' }; }
+      finding = true;
+      const found = (x) => { if (ui.found) ui.found(x); };
+      try {
+        found({ busy: true });
+        let md = last;
+        let meta = session ? session.meta : null;
+        if (!md) {
+          const prep = prepare(doc, loc);
+          meta = prep.meta;
+          if (prep.pdfs.length) {
+            ui.log('搜原题：先把题面从 PDF 里取出来（只读文字层，不调用视觉模型，也不会动剪贴板）……');
+            const c = { cfg: loadConfig(storage), meta: prep.meta, force: false, auto: true, engine: 'text', statementText: prep.markdown };
+            running = true;                       // readAll 会借主按钮显示进度，借用一下“忙”的标记，完事恢复
+            let results;
+            try { results = await readAll(prep.pdfs, c, false); } finally { running = false; }
+            pickAll(results, c);
+            md = assemble(prep.meta, prep.markdown, prep.pdfs, results);
+            last = md;
+            ui.result(md);
+            ui.state('idle', '📋 题面转 Markdown', '识别题面里的 PDF 并复制 Markdown');
+          } else {
+            md = assemble(prep.meta, prep.markdown, [], []);
+          }
+        }
+        if (!meta) { try { meta = extractMeta(doc, loc); } catch (e) { meta = null; } }
+        const query = buildSearchQuery(md, meta);
+        if (query.replace(/\s+/g, '').length < YUANTIJI_MIN_QUERY) {
+          throw new UserError('FIND_EMPTY', '没取到足够长的题面文字，搜不了原题：先点“题面转 Markdown”确认能读出文字（扫描件 PDF 要配好视觉模型再转），然后再点 🔎 搜原题');
+        }
+        const wait = 3000 - (Date.now() - lastFindAt);
+        if (wait > 0) await deps.sleep(wait);
+        lastFindAt = Date.now();
+        ui.log(`搜原题：把题面（${query.length} 字）发给原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），取最像的 ${YUANTIJI_K} 道，通常要十几秒……`);
+        const t0 = Date.now();
+        const r = await searchYuantiji(query, deps);
+        const secs = r.timing && r.timing.total != null && Number.isFinite(Number(r.timing.total))
+          ? Math.round(Number(r.timing.total) * 10) / 10
+          : Math.round((Date.now() - t0) / 100) / 10;
+        if (!r.reranked) ui.log('提示：原题机这次没有启用重排（rerank），结果是按语义相似度 cos 排的');
+        if (!r.rows.length) {
+          ui.log('搜原题：没找到相似的题（新题，或者题面被“跳过过短题面”滤掉了；可以打开 yuantiji.ac 手动粘题面再试）');
+          found({ rows: [], secs, meta });
+          return { rows: [], secs };
+        }
+        r.rows.forEach((row, i) => {
+          ui.log(`  ${i + 1}. ${row.title}（${row.uid || row.src}）相似度 ${row.sim == null ? '?' : pct(row.sim)}${simLabel(row.cos) ? ` · ${simLabel(row.cos)}` : ''}`);
+          const links = [row.origUrl && `原题：${row.origUrl}`, row.vjUrl && `VJudge：${row.vjUrl}`].filter(Boolean);
+          if (links.length) ui.log(`     ${links.join(' ｜ ')}`);
+        });
+        ui.log(`搜原题完成（约 ${secs} 秒）：点上面结果区里的链接去原站 / VJudge 核对——相似度高也不等于就是同一道题`);
+        const payload = { rows: r.rows, secs, meta, rewrites: r.rewrites, reranked: r.reranked, md: findResultsMarkdown(r.rows, meta) };
+        found(payload);
+        return payload;
+      } catch (e) {
+        ui.log(`搜原题失败：${e.message}`);
+        found({ error: e.message });
+        return { error: e.message, code: e.code };
+      } finally {
+        finding = false;
+      }
+    }
+
+    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, getLast: () => last, isBusy: () => running };
   }
 
   /* ---------------------------------------------------------------------- *
@@ -3621,6 +3915,7 @@
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, searchYuantiji,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }
@@ -3953,6 +4248,23 @@
     .log:empty { display: none; }
     .row[hidden], button[hidden] { display: none; }
     .card[data-mode="list"] [data-act="rerun-ai"] { display: none; }
+    .card[data-mode="list"] [data-act="find"] { display: none; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .findbox { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; background: #f9fafb; max-height: 230px; overflow: auto; }
+    .findbox[hidden] { display: none; }
+    .findbox .fh { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #374151; margin-bottom: 6px; }
+    .findbox .fh b { flex: 1; }
+    .findbox .fh button.flat { padding: 3px 9px; font-size: 12px; }
+    .findbox ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+    .findbox .ft { font-weight: 600; }
+    .findbox a { color: #2563eb; text-decoration: none; }
+    .findbox a:hover { text-decoration: underline; }
+    .findbox .sim { font-variant-numeric: tabular-nums; }
+    .findbox .chip { display: inline-block; padding: 0 6px; border-radius: 999px; background: #fef3c7; color: #92400e; font-size: 11px; }
+    .findbox .sub { font-size: 12px; color: #6b7280; }
+    .findbox .snip, .findbox .rw { font-size: 12px; color: #6b7280; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .findbox .rw { color: #9ca3af; margin-top: 6px; }
+    .findbox .err { color: #b91c1c; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
     .card select { min-width: 0; padding: 5px 8px; font: inherit; color: #111827; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; }
     .pickrow { font-size: 12px; color: #4b5563; }
     .modal { position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); }
@@ -3981,6 +4293,7 @@
         <button class="flat ghost" data-act="rerun" id="rerunBtn" title="忽略缓存，按当前设置重新识别">重新识别</button>
         <button class="flat ghost" data-act="rerun-ai" title="把每一页渲染成图片交给视觉模型识别（需要先配置 API）">AI 重新识别</button>
         <button class="flat ghost" data-act="switch" id="switchBtn" title="主接口 / 备用接口来回切换（设置里两套都填好才会出现）" hidden>⇄ 备用</button>
+        <button class="flat ghost" data-act="find" id="findBtn" title="把这道题的题面发给原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），列出最像的 3 道及原题 / VJudge 链接">🔎 搜原题</button>
         <button class="flat" data-act="copy">复制</button>
         <button class="flat ghost" data-act="close">关闭</button>
       </div>
@@ -3989,6 +4302,7 @@
         <select class="grow" id="pickSel"></select>
       </div>
       <div class="log" id="log"></div>
+      <div class="findbox" id="findBox" hidden></div>
       <textarea id="out" spellcheck="false"></textarea>
     </div>
     <div class="modal" id="modal" hidden>
@@ -4027,6 +4341,8 @@
         <label class="check"><input type="checkbox" id="listauto"> 打开题单页时自动复制全部题面 <small>（题数不超过 50；自动开始只读 PDF 文字层，不调用视觉模型；取消勾选则只在点按钮时才复制）</small></label>
         <label>每题之间的间隔（毫秒） <small>相邻两道题的请求之间等多久。默认 500；0 = 不等待；最大 10000</small><input type="number" id="listgap" min="0" max="10000" step="100"></label>
         <label class="check"><input type="checkbox" id="listeach"> 逐题写入剪贴板 <small>（每转换完一道题先复制一次，最后再复制整份；给剪贴板历史工具用）</small></label>
+        <b style="font-size:13px">搜原题 <small>原题机 yuantiji.ac（第三方的免费公益站，不是官方接口；库里约 25 万道题）</small></b>
+        <label class="check"><input type="checkbox" id="findauto"> 转写完成后自动搜原题 <small>（每次都会把这道题的题面文字发给 yuantiji.ac 并等十几秒；Expert = 重写题面 + 跳过过短题面 + 重排，取最像的 3 道。默认关闭——也可以随时在面板里点“🔎 搜原题”）</small></label>
         <div class="msg" id="msg"></div>
         <div class="row">
           <button class="flat ghost" data-act="test" title="测试当前选中的那套接口（勾了“当前使用备用接口”就测备用）">测试连接</button>
@@ -4060,6 +4376,7 @@
       engine: $('engine'), apiUrl: $('apiUrl'), apiKey: $('apiKey'), model: $('model'), extra: $('extra'), concurrency: $('concurrency'), auto: $('auto'), pick: $('pickon'), holeImg: $('holeimg'),
       altUrl: $('altUrl'), altKey: $('altKey'), altModel: $('altModel'), altExtra: $('altExtra'), useAlt: $('usealt'),
       listAuto: $('listauto'), listGap: $('listgap'), listEach: $('listeach'),
+      findAuto: $('findauto'),
     };
     $('panel').dataset.mode = h.mode || 'problem';
     if (h.mode === 'list') {
@@ -4081,6 +4398,7 @@
       });
     });
 
+    let lastFoundMd = '';          // 最近一次搜原题结果的 Markdown（“复制结果”按钮复制它）
     const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `msg${kind ? ` ${kind}` : ''}`; };
     const readForm = () => ({
       engine: fields.engine.value,
@@ -4095,6 +4413,7 @@
       listAuto: fields.listAuto.checked,
       listGap: Number.isNaN(parseInt(fields.listGap.value, 10)) ? LIST_GAP_MS : Math.max(0, Math.min(LIST_GAP_MAX, parseInt(fields.listGap.value, 10))),
       listEach: fields.listEach.checked,
+      findAuto: fields.findAuto.checked,
       alt: {
         apiUrl: fields.altUrl.value.trim(),
         apiKey: fields.altKey.value.trim(),
@@ -4127,6 +4446,7 @@
       fields.listAuto.checked = c.listAuto !== false;
       fields.listGap.value = listGapOf(c);
       fields.listEach.checked = !!c.listEach;
+      fields.findAuto.checked = !!c.findAuto;
       const alt = c.alt || EMPTY_API;
       fields.altUrl.value = alt.apiUrl || '';
       fields.altKey.value = alt.apiKey || '';
@@ -4168,6 +4488,13 @@
         case 'stop': h.stop(); break;
         case 'rerun-ai': h.run({ force: true, engine: 'ai' }); break;
         case 'panel': openPanel(); break;
+        case 'find': h.find(); break;
+        case 'copyfind': {
+          if (!lastFoundMd) break;
+          const okFind = await h.copy(lastFoundMd);
+          setCopyLabel(btn, okFind);
+          break;
+        }
         case 'close': $('panel').hidden = true; break;
         case 'copy': {
           const ok = await h.copy(out.value);
@@ -4229,6 +4556,102 @@
       /** 题单复制进行中：显示面板里的“停止”按钮。 */
       busy(on) { $('stopBtn').hidden = !on; },
       result(md) { out.value = md; },
+      /**
+       * 搜原题结果区：传 null 收起；{busy:true} 显示“搜索中”；{error} 显示错误；
+       * {rows, secs, md, rewrites} 渲染结果。返回的都是第三方文字：一律 textContent 填，
+       * href 在 normalizeFindRow 里已验过 http(s)，不拿 innerHTML 拼。
+       */
+      found(data) {
+        const box = $('findBox');
+        const btn = $('findBtn');
+        btn.disabled = !!(data && data.busy);
+        btn.textContent = data && data.busy ? '🔎 搜索中…' : '🔎 搜原题';
+        if (!data) { box.hidden = true; box.textContent = ''; lastFoundMd = ''; return; }
+        box.hidden = false;
+        box.textContent = '';
+        const link = (href, text, title) => {
+          const a = document.createElement('a');
+          a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = text;
+          if (title) a.title = title;
+          return a;
+        };
+        const head = document.createElement('div');
+        head.className = 'fh';
+        const b = document.createElement('b');
+        b.textContent = data.busy ? '正在去原题机搜原题（Expert，约十几秒）…'
+          : (data.error ? '搜原题失败' : `原题机 · Expert · 最像的 ${data.rows.length} 道${data.secs != null ? `（约 ${data.secs} 秒）` : ''}`);
+        head.appendChild(b);
+        if (data.rows && data.rows.length) {
+          const cp = document.createElement('button');
+          cp.className = 'flat ghost'; cp.dataset.act = 'copyfind'; cp.textContent = '复制结果';
+          head.appendChild(cp);
+        }
+        head.appendChild(link('https://yuantiji.ac', 'yuantiji.ac'));
+        box.appendChild(head);
+        if (data.error || data.busy) {
+          lastFoundMd = '';
+          if (data.error) { const e = document.createElement('div'); e.className = 'err'; e.textContent = data.error; box.appendChild(e); }
+          return;
+        }
+        lastFoundMd = data.md || '';
+        if (!data.rows.length) {
+          const e = document.createElement('div');
+          e.className = 'sub'; e.textContent = '没有找到相似的题。';
+          box.appendChild(e);
+          return;
+        }
+        const ol = document.createElement('ol');
+        const pctText = (v) => `${Math.round(v * 100)}%`;
+        data.rows.forEach((r) => {
+          const li = document.createElement('li');
+          const t = document.createElement('div');
+          if (r.origUrl) { const a = link(r.origUrl, r.title); a.className = 'ft'; t.appendChild(a); }
+          else { const sp = document.createElement('span'); sp.className = 'ft'; sp.textContent = r.title; t.appendChild(sp); }
+          const sim = document.createElement('span');
+          sim.className = 'sim';
+          sim.textContent = ` 相似度 ${r.sim == null ? '?' : pctText(r.sim)}${r.cos != null && r.rr != null ? `（cos ${r.cos.toFixed(3)} · 重排 ${r.rr.toFixed(3)}）` : ''}`;
+          t.appendChild(sim);
+          const lab = simLabel(r.cos);
+          if (lab) {
+            const c = document.createElement('span');
+            c.className = 'chip'; c.textContent = lab;
+            t.appendChild(document.createTextNode(' '));
+            t.appendChild(c);
+          }
+          li.appendChild(t);
+          const sub = document.createElement('div');
+          sub.className = 'sub';
+          const idText = r.uid || r.src;
+          if (idText) sub.appendChild(document.createTextNode(idText));
+          if (r.origUrl || r.vjUrl) {
+            if (idText) sub.appendChild(document.createTextNode(' · '));
+            if (r.origUrl) sub.appendChild(link(r.origUrl, '原题'));
+            if (r.origUrl && r.vjUrl) sub.appendChild(document.createTextNode(' ｜ '));
+            if (r.vjUrl) sub.appendChild(link(r.vjUrl, 'VJudge', '按 Source/题号拼的地址（接口本身没给）；极少数 OJ 的题号在 VJudge 上不一样，打不开就用左边的原题链接'));
+          }
+          li.appendChild(sub);
+          if (r.also && r.also.length) {
+            const ao = document.createElement('div');
+            ao.className = 'sub';
+            ao.appendChild(document.createTextNode('同题还见于：'));
+            r.also.forEach((a, k) => {
+              if (k) ao.appendChild(document.createTextNode(' · '));
+              ao.appendChild(a.url ? link(a.url, a.uid) : document.createTextNode(a.uid));
+            });
+            li.appendChild(ao);
+          }
+          if (r.snip) { const sn = document.createElement('div'); sn.className = 'snip'; sn.textContent = r.snip; li.appendChild(sn); }
+          ol.appendChild(li);
+        });
+        box.appendChild(ol);
+        if (data.rewrites && data.rewrites.t0) {
+          const rw = document.createElement('div');
+          rw.className = 'rw';
+          rw.title = String(data.rewrites.t0);
+          rw.textContent = `重写后的题面（拿去检索的）：${data.rewrites.t0}`;
+          box.appendChild(rw);
+        }
+      },
       /** 面板里“PDF 里有多道题，取：”的下拉框。options = [{ value, label }]；传 null 隐藏。 */
       picks(options, selected) {
         const sel = $('pickSel');
@@ -4262,6 +4685,7 @@
       log: (...a) => { log(...a); if (ui) ui.log(...a); },
       result: (...a) => ui && ui.result(...a),
       picks: (...a) => ui && ui.picks(...a),
+      found: (...a) => ui && ui.found(...a),
     };
     const runner = createRunner({
       doc: document,
@@ -4288,7 +4712,9 @@
       ui.clearLog();
       if (isList) ui.busy(true);
       try {
-        await (isList ? runner.runList(opts) : runner.run(opts));
+        const done = await (isList ? runner.runList(opts) : runner.run(opts));
+        // 设置里开了“转写完成后自动搜原题”：题面已经复制完了，再顺手去原题机搜一把（十几秒，不挡主流程）
+        if (!isList && done && !done.skipped && loadConfig(storage).findAuto) runner.searchOriginal().catch((e) => log('搜原题失败：', e));
       } catch (e) {
         log('失败：', e);
         if (e.code === 'NO_CONFIG') {
@@ -4323,6 +4749,7 @@
       },
       test: (cfg, only) => runner.testConnection(cfg, only),
       switchApi: () => runner.switchApi(),
+      find: () => { ui.openPanel(); runner.searchOriginal().catch((e) => log('搜原题失败：', e)); },
       onSaved: () => {
         if (isList) {                                                // 题单页：间隔改了，按钮上的提示跟着变；不会因为改设置就重新跑一遍整个题单
           if (ui.stateName() === 'idle' && listCount()) ui.state('idle', listLabel(listCount()), listTip());
@@ -4340,6 +4767,7 @@
       } else {
         GM_registerMenuCommand('📋 识别并复制本题', () => trigger({}));
         GM_registerMenuCommand('🔁 用视觉模型重新识别', () => trigger({ force: true, engine: 'ai' }));
+        GM_registerMenuCommand('🔎 搜原题（原题机）', () => { ui.openPanel(); runner.searchOriginal(); });
       }
       GM_registerMenuCommand('🧹 清除识别缓存', () => { storage.set(CACHE_KEY, {}); ui.log('已清除识别缓存'); });
     }

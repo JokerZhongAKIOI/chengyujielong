@@ -895,6 +895,114 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(/已切到主接口/.test(logs.join('\n')), logs.join(' ｜ '));
   });
 
+  test('搜原题：拿去检索的文本去掉页眉/图片/插件提示，只留题名和题面，且截在 15000 字', () => {
+    const md = [
+      '# P2196. 葫芦娃救爷爷',
+      '',
+      '> 来源：https://www.goj.wiki/p/P2196 ｜ 时间限制：1s',
+      '',
+      '## 题目描述',
+      '',
+      '有 $n$ 个葫芦娃，第 $i$ 个葫芦娃的战斗力是 $p_i$。',
+      '',
+      '![公式](data:image/png;base64,QUFBQQ==)',
+      '',
+      '<!--',
+      '⚠️ 第 1 页没有文字，已跳过',
+      '-->',
+      '',
+      '%%PDF:0%%',
+    ].join('\n');
+    const q = plugin.buildSearchQuery(md, { title: '葫芦娃救爷爷' });
+    assert.ok(q.startsWith('葫芦娃救爷爷'), `题名要放在最前：${q.slice(0, 40)}`);
+    assert.ok(q.includes('有 $n$ 个葫芦娃'), '题面正文和 LaTeX 要留着');
+    assert.ok(!/data:image|来源|%%PDF|已跳过/.test(q), `图片/页眉/提示/占位符不能发过去：${q}`);
+    assert.ok(plugin.buildSearchQuery('题'.repeat(20000), {}).length <= 15000, '接口上限 16000，要提前截断');
+  });
+
+  test('搜原题：接口一行结果整理成 相似度 + 原题链接 + VJudge 链接（uid = Source/题号）', () => {
+    const payload = {
+      results: [
+        { uid: 'CodeForces/1784C', title: 'Make it Increasing?', src: 'CodeForces', url: 'https://codeforces.com/problemset/problem/1784/C', cos: 0.9134, rr: 0.97, base_rank: 2, t0: '简化题意', original: '原始题面', also: [{ uid: 'AtCoder/abc239_ex', url: 'https://atcoder.jp/contests/abc239/tasks/abc239_ex' }] },
+        { uid: 'AtCoder/abc239_ex', title: 'Construct a Train', src: 'AtCoder', url: 'https://atcoder.jp/contests/abc239/tasks/abc239_ex', cos: 0.8701, rr: null },
+        { uid: 'CodeForces/102001A', title: 'Gym 题', src: 'CodeForces', url: 'https://codeforces.com/gym/102001/problem/A', cos: 0.5, rr: 0.4 },
+        { uid: 'CodeForces/1A', title: '第 4 道（不该出现）', src: 'CodeForces', url: 'https://codeforces.com/problemset/problem/1/A', cos: 0.4, rr: 0.3 },
+      ],
+      rewrites: { t0: '重写1', t1: '重写2' }, reranked: true, timing: { total: 12.3 },
+    };
+    const r = plugin.parseYuantijiResponse(JSON.stringify(payload));
+    assert.strictEqual(r.rows.length, 3, '只取前 3 道');
+    assert.strictEqual(r.rows[0].sim, 0.9134, '相似度以 cos 为准');
+    assert.strictEqual(plugin.simLabel(r.rows[0].cos), '几乎肯定是原题');
+    assert.strictEqual(r.rows[0].origUrl, 'https://codeforces.com/problemset/problem/1784/C', '接口的 url 就是原题链接');
+    assert.strictEqual(r.rows[0].vjUrl, 'https://vjudge.net/problem/CodeForces-1784C');
+    assert.strictEqual(r.rows[0].also[0].uid, 'AtCoder/abc239_ex', '同题在别的 OJ 也要带出来');
+    assert.strictEqual(r.rows[1].vjUrl, 'https://vjudge.net/problem/AtCoder-abc239_ex');
+    assert.strictEqual(plugin.simLabel(r.rows[1].cos), '很可能是原题');
+    assert.strictEqual(r.rows[2].vjUrl, 'https://vjudge.net/problem/Gym-102001A', '6 位比赛号是 Gym 题');
+    // 防御：万一接口哪天直接给 VJudge 地址，也要能拼回原题链接
+    const d = plugin.normalizeFindRow({ uid: 'CodeForces/1730C', title: 'T', src: 'CodeForces', url: 'https://vjudge.net/problem/CodeForces-1730C', cos: 0.9 });
+    assert.strictEqual(d.vjUrl, 'https://vjudge.net/problem/CodeForces-1730C');
+    assert.strictEqual(d.origUrl, 'https://codeforces.com/problemset/problem/1730/C');
+    // 不在 VJudge 上的 OJ：只给原题链接，不硬拼 VJudge
+    const u = plugin.normalizeFindRow({ uid: 'SomeOJ/123', title: 'T', src: 'SomeOJ', url: 'https://example.com/p/123', cos: 0.4 });
+    assert.strictEqual(u.vjUrl, '');
+    assert.strictEqual(u.origUrl, 'https://example.com/p/123');
+  });
+
+  await testAsync('搜原题：点按钮 → Expert 参数发给 /api/search → 面板拿到结果（带 VJudge 链接的 Markdown）', async () => {
+    const { JSDOM } = require('jsdom');
+    const stmt = '给定长度为 n 的序列 a，每次可以把一个数加一或减一，求把它变成不下降序列的最小操作次数。'.repeat(3);
+    const html = `<!doctype html><html><body><div class="problem-content"><h1 class="section__title">P9999. 测试题</h1><div class="section__body typo richmedia" data-fragment-id="problem-description"><h2>题目描述</h2><p>${stmt}</p></div></div></body></html>`;
+    const dom = new JSDOM(html, { url: 'https://www.goj.wiki/p/P9999' });
+    const storage = new Map();
+    const logs = [];
+    const foundCalls = [];
+    const reqs = [];
+    const runner = plugin.createRunner({
+      doc: dom.window.document,
+      loc: dom.window.location,
+      storage: { get: (k, d) => (storage.has(k) ? storage.get(k) : d), set: (k, v) => storage.set(k, v) },
+      ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: () => {}, picks: () => {}, found: (x) => foundCalls.push(x) },
+      loadPdf: async () => { throw new Error('这个页面没有 PDF，不该读 PDF'); },
+      sleep: async () => {},
+      copy: async () => true,
+      http: async (opts) => {
+        reqs.push(opts);
+        return { status: 200, text: JSON.stringify({ results: [{ uid: 'CodeForces/1730C', title: 'Even Number Addicts', src: 'CodeForces', url: 'https://codeforces.com/problemset/problem/1730/C', cos: 0.88, rr: 0.95, t0: '简化题意' }], rewrites: { t0: '重写后的题面' }, reranked: true, timing: { total: 9.9 } }) };
+      },
+    });
+    const out = await runner.searchOriginal();
+    assert.strictEqual(reqs.length, 1);
+    assert.strictEqual(reqs[0].method, 'POST');
+    assert.strictEqual(reqs[0].url, plugin.YUANTIJI_API);
+    const body = JSON.parse(reqs[0].data);
+    assert.deepStrictEqual(
+      { k: body.k, rewrite: body.rewrite, rerank: body.rerank, skip_short: body.skip_short },
+      { k: 3, rewrite: true, rerank: true, skip_short: true },
+      'Expert：重写 + 跳过过短 + 重排全开，只取 3 道',
+    );
+    assert.ok(body.query.includes('给定长度为'), `要发题面正文：${body.query.slice(0, 60)}`);
+    assert.ok(!/来源/.test(body.query), '页眉（来源）不发');
+    assert.strictEqual(out.rows.length, 1);
+    const lastFound = foundCalls[foundCalls.length - 1];
+    assert.strictEqual(lastFound.rows[0].vjUrl, 'https://vjudge.net/problem/CodeForces-1730C');
+    assert.ok(lastFound.md.includes('[VJudge](https://vjudge.net/problem/CodeForces-1730C)'), `复制结果里要有 VJudge 链接：${lastFound.md}`);
+    assert.ok(logs.some((l) => /搜原题完成/.test(l)), logs.join(' ｜ '));
+  });
+
+  await testAsync('搜原题：原题机 500 时只重试一次并把错误说清楚；自动搜原题默认关闭', async () => {
+    let calls = 0;
+    const err = await plugin.searchYuantiji('任意一段足够长的题面文字', {
+      sleep: async () => {},
+      http: async () => { calls++; return { status: 500, text: '{"detail":"boom"}' }; },
+    }).catch((e) => e);
+    assert.strictEqual(calls, 2, '5xx 重试一次就够了（每次搜索对方都要花钱跑模型）');
+    assert.ok(/暂时不可用/.test(err.message), err.message);
+    assert.strictEqual(plugin.DEFAULT_CFG.findAuto, false, '要把题面发给第三方，默认不能自动发');
+    assert.strictEqual(plugin.loadConfig({ get: (k, d) => d }).findAuto, false, '老配置也要读成关闭');
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
