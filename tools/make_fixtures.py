@@ -124,7 +124,86 @@ def make_scan(path):
     c.save()
 
 
-make_plain(os.path.join(OUT, 'plain-text-math.pdf'))
-make_vector(os.path.join(OUT, 'vector-math.pdf'))
-make_scan(os.path.join(OUT, 'scan.pdf'))
-print('fixtures →', OUT)
+def make_mock_contest(path):
+    """一整场模拟赛的 PDF（封面 + 三道题）：Word 排版的典型样子——
+    每道题的题名和正文同一种字体、字号只大一点点（11 对 10.5：算不上“大标题”、又没有粗体），
+    小节名（题目描述/输入格式…）12.5，所以只有小节名会变成标题块，
+    题名只是一行普通段落“2. 星际旅行”，下面紧跟着“源程序文件名：travel.cpp”的元信息行。
+    用来测“一份 PDF 里有多道题时抠出与本题同名的那一道”。"""
+    c = canvas.Canvas(path, pagesize=A4)
+
+    def line(x, y, text, size=10.5, font=FONT):
+        c.setFont(font, size)
+        c.drawString(x, y, text)
+
+    # 封面
+    line(118, 760, '2026 年菁英中学信息学模拟赛', 20)
+    line(60, 716, '请在规定时间内完成下列三道题目，源程序文件名不要写错。')
+    line(60, 688, '第一题 葫芦娃救爷爷 (calabash.cpp)', 11)
+    line(60, 668, '第二题 星际旅行 (travel.cpp)', 11)
+    line(60, 648, '第三题 棋盘染色 (chess.cpp)', 11)
+    line(60, 612, '注意事项：答案文件放在以参赛号命名的目录下。')
+    c.showPage()
+
+    def problem(num, name, fname, desc, inlines, outlines, sample, rng):
+        line(60, 782, f'{num}. {name}', 11)
+        line(60, 764, f'源程序文件名：{fname}.cpp 输入文件名：{fname}.in 输出文件名：{fname}.out', 10)
+        line(60, 736, '题目描述', 12.5)
+        y = 714
+        for t in desc:
+            line(60, y, t)
+            y -= 20
+        line(60, y - 8, '输入格式', 12.5)
+        y -= 30
+        for t in inlines:
+            line(60, y, t)
+            y -= 20
+        line(60, y - 8, '输出格式', 12.5)
+        y -= 30
+        for t in outlines:
+            line(60, y, t)
+            y -= 20
+        line(60, y - 8, '样例', 12.5)
+        y -= 32
+        for t in sample:
+            line(60, y, t, 9.5, 'Courier')
+            y -= 16
+        line(60, y - 10, '数据范围', 12.5)
+        line(60, y - 32, rng)
+        c.showPage()
+
+    problem(1, '葫芦娃救爷爷', 'calabash',
+            ['山里住着七个葫芦娃，爷爷被山里的妖精抓走了。',
+             '第 i 个葫芦娃的战斗力是 p_i，他们决定轮流上山去救爷爷。',
+             '求爷爷最终被救出来的概率。'],
+            ['第一行一个整数 n，表示葫芦娃的个数。',
+             '第二行 n 个小数，表示每个葫芦娃的战斗力。'],
+            ['输出一个小数，表示救出爷爷的概率。'],
+            ['7', '0.5 0.5 0 0 0 0 0'],
+            '对于 100% 的数据，保证 1 ≤ n ≤ 10^5。')
+    problem(2, '星际旅行', 'travel',
+            ['星际联邦有 n 个星球，编号 1 到 n，星球之间有虫洞相连。',
+             '每穿过一个虫洞需要消耗一定的能量，不同虫洞消耗不同。',
+             '求从地球出发到每个星球的最小总能量消耗。'],
+            ['第一行两个整数 n、m，表示星球和虫洞的数量。',
+             '接下来 m 行，每行三个整数 u、v、w，表示一条虫洞。'],
+            ['输出一行 n 个整数，表示到每个星球的最小消耗。'],
+            ['3 3', '1 2 5', '2 3 7'],
+            '对于 100% 的数据，保证 1 ≤ n ≤ 10^5，1 ≤ m ≤ 2×10^5。')
+    problem(3, '棋盘染色', 'chess',
+            ['有一块 n 行 m 列的棋盘，每个格子都要染成黑色或者白色。',
+             '要求任意两个相邻的格子颜色不能相同。',
+             '求一共有多少种不同的染色方案。'],
+            ['一行两个整数 n、m，表示棋盘的行数和列数。'],
+            ['输出一个整数，表示染色方案的个数。'],
+            ['2 2'],
+            '对于 100% 的数据，保证 1 ≤ n, m ≤ 10^9。')
+    c.save()
+
+
+if __name__ == '__main__':
+    make_plain(os.path.join(OUT, 'plain-text-math.pdf'))
+    make_vector(os.path.join(OUT, 'vector-math.pdf'))
+    make_scan(os.path.join(OUT, 'scan.pdf'))
+    make_mock_contest(os.path.join(OUT, 'mock-contest.pdf'))
+    print('fixtures →', OUT)

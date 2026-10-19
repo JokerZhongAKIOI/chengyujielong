@@ -1003,6 +1003,61 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(plugin.loadConfig({ get: (k, d) => d }).findAuto, false, '老配置也要读成关闭');
   });
 
+  test('多道题抠题：题名是普通段落行（带序号并跟元信息并成一行 / 无序号粗体行）也分得出来', () => {
+    const sec = (body) => ['## 题目描述', body, '## 输入格式', '第一行一个整数。', '## 输出格式', '一行一个整数。'].join('\n\n');
+    // Word 排版的模拟赛卷子转写后的典型长相：题名与正文同字体、只大一点点，没能成标题行，还和元信息并成一行
+    const merged = [
+      '1. 葫芦娃救爷爷源程序文件名：calabash.cpp 输入文件名：calabash.in 输出文件名：calabash.out', sec('葫芦娃的战斗力是 p_i。'),
+      '2. 星际旅行源程序文件名：travel.cpp 输入文件名：travel.in 输出文件名：travel.out', sec('星球之间有虫洞相连。'),
+      '3. 棋盘染色源程序文件名：chess.cpp 输入文件名：chess.in 输出文件名：chess.out', sec('格子染成黑色或白色。'),
+    ].join('\n\n');
+    const r = plugin.findProblems(merged, { title: '星际旅行', pid: 'P100' });
+    assert.strictEqual(r.problems.length, 3, `该分出三道题：${JSON.stringify(r.problems.map((x) => x.title))}`);
+    assert.strictEqual(r.best, 1);
+    assert.ok(r.problems[1].titles[0].tail.includes('travel.cpp'), '并在题名后面的元信息要单独记在 tail 里');
+    const sl = plugin.sliceProblem(merged, r.problems[1], { dropTitle: true });
+    assert.ok(sl.includes('虫洞') && sl.includes('travel.cpp'), `切出来的该有本题正文和元信息：${sl.slice(0, 120)}`);
+    assert.ok(!sl.includes('战斗力') && !sl.includes('染成黑色'), '不能串进别道题');
+    assert.ok(!sl.includes('## 2. 星际旅行'), 'dropTitle 时不再重复题名行');
+    // 无序号的粗体独立行
+    const bold = ['**葫芦娃救爷爷**', sec('葫芦娃正文。'), '**星际旅行**', sec('虫洞正文。'), '**棋盘染色**', sec('染色正文。')].join('\n\n');
+    const r2 = plugin.findProblems(bold, { title: '星际旅行', pid: 'P100' });
+    assert.strictEqual(r2.problems.length, 3);
+    assert.strictEqual(r2.best, 1);
+  });
+
+  test('多道题抠题：题名在“第X题”下一行、或本题只有英文文件名时也匹配得上；单题绝不误拆', () => {
+    const sec = (body) => ['### 题目描述', body, '### 输入格式', 'x', '### 输出格式', 'y'].join('\n\n');
+    const split = ['## 第一题', '葫芦娃救爷爷', sec('葫芦娃正文。'), '## 第二题', '星际旅行', sec('虫洞正文。'), '## 第三题', '棋盘染色', sec('染色正文。')].join('\n\n');
+    const r = plugin.findProblems(split, { title: '星际旅行', pid: 'P100' });
+    assert.strictEqual(r.best, 1, `题名在题号的下一行也要认得出：${JSON.stringify(r.problems.map((x) => [x.title, x.score]))}`);
+    const secF = (f, body) => [`源程序文件名：${f}.cpp`, '## 题目描述', body, '## 输入格式', 'x', '## 输出格式', 'y'].join('\n\n');
+    const byFile = ['## 葫芦娃救爷爷', secF('calabash', '葫芦娃正文。'), '## 星际旅行', secF('travel', '虫洞正文。'), '## 棋盘染色', secF('chess', '染色正文。')].join('\n\n');
+    const r2 = plugin.findProblems(byFile, { title: 'travel', pid: 'T2' });
+    assert.strictEqual(r2.best, 1, '本题在站上只叫 travel 时，要靠源程序文件名对上号');
+    // 防误拆：一道题里的编号列表、短行
+    const single = ['## 葫芦娃救爷爷', '## 题目描述', '有两种操作：', '', '1. 把一个数加一', '', '2. 把一个数减一', '', '求最小操作次数。', '## 输入格式', '第一行 n。', '## 输出格式', '一行答案。'].join('\n');
+    assert.strictEqual(plugin.findProblems(single, { title: '葫芦娃救爷爷', pid: 'P1' }).problems.length, 0, '题面内部的编号列表不能被拆成几道题');
+  });
+
+  await testAsync('模拟赛 PDF（封面＋三道题，题名不是标题样式）：抠出与本题同名的那一道（只读文字层，不调 API）', async () => {
+    const handle = await openPdf(load('mock-contest.pdf'));
+    const logs = [];
+    const r = await plugin.recognizePdf({
+      handle, engine: 'text', cfg: plugin.DEFAULT_CFG, title: '星际旅行', pid: 'P1002', auto: false, progress: () => {},
+    }, fakeDeps([], logs));
+    assert.strictEqual(r.problems.length, 3, `该认出三道题：${JSON.stringify(r.problems.map((x) => x.title))}`);
+    assert.strictEqual(r.best, 1, `该取第二题：bestScore=${r.bestScore}`);
+    assert.ok(!r.notes.some((n) => /没能认出每道题的分界/.test(n)), `不该再提示分不出来：${r.notes.join('｜')}`);
+    const sl = plugin.sliceProblem(r.rawBody, r.problems[r.best], { dropTitle: true });
+    assert.ok(sl.includes('虫洞') && sl.includes('travel.cpp'), '切出来的正文和源程序文件名都得在');
+    assert.ok(!sl.includes('战斗力') && !sl.includes('染色方案'), '不能串进第一、第三题');
+    const byEn = await plugin.recognizePdf({
+      handle, engine: 'text', cfg: plugin.DEFAULT_CFG, title: 'travel', pid: 'T2', auto: false, progress: () => {},
+    }, fakeDeps([], logs));
+    assert.strictEqual(byEn.best, 1, '站上只叫 travel 时也要对上第二题');
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {

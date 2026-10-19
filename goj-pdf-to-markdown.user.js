@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.10.0
+// @version      2.11.0
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接）
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -44,7 +44,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.10.0';
+  const VERSION = '2.11.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -1980,6 +1980,9 @@
   // 不是题名的标题：空白页提示（THUPC 的“此页刻意留白”）；题名下面的元数据行（“主文件名：cchkk”“时间限制：1 秒”）
   const NOISE_HEAD_RE = /^(?:(?:此页|本页|该页)(?:刻意|特意|有意|故意)?(?:留白|空白)|(?:刻意|特意)?留白页?|空白页|this page (?:is )?intentionally (?:left )?blank|intentionally left blank)$/i;
   const META_HEAD_RE = /^(?:主文件名|源程序文件名|源文件名|程序文件名|文件名|存盘名|程序名|可执行文件名|输入文件名?|输出文件名?|时间限制|空间限制|内存限制|时限|input file|output file|time limit|memory limit)\s*[:：]/i;
+  // 题名和元信息被并成一行时（“2. 星际旅行源程序文件名：travel.cpp …”，Word 排版的模拟赛卷子经文字层转写后常见）：
+  // 从元信息开始的那一截（tail）切下来单独留着，题名只剩前半段，形状判断和相似度都对着它算。
+  const META_CUT_RE = /(?:主文件名|源程序文件名|源文件名|程序文件名|存盘名|程序名|文件名|可执行文件名|输入文件|输出文件|时间限制|空间限制|内存限制|时空限制|时限|input file|output file|time limit|memory limit)\s*[:：]/i;
 
   // 正文里“题号 + 题名”形式的题名行（不是标题样式）：老 NOIP 试卷的“题一 均分纸牌（存盘名 NOIPG1） [问题描述]”、正文大小的“1．Vigenère 密码”。
   // specific：这种写法本身就是题号（题一 / 第一题 / Problem A / T1），可以直接当候选；否则（“1．”“A.”）要同一份文档里已有同写法的标题行为凭据，只补缺的序号。
@@ -1998,6 +2001,7 @@
     { id: 'wt', specific: true, re: /^(?:题目|试题|问题)\s*([A-Za-z](?![\p{L}\d])|\d{1,3}(?!\d)|[一二三四五六七八九十]{1,3}(?![一二三四五六七八九十百]))\s*[.．、:：)）\-—]*\s*/u },
     { id: 'pr', specific: true, re: /^(?:problem|task|question)\s*([A-Za-z]|\d{1,3})\s*[.:：)\-—]*\s+/iu },
     { id: 'tn', specific: true, re: /^T\s*(\d{1,3})(?![\p{L}\d])\s*[.．、:：)）\-—]?\s*/u },
+    { id: 'paren', specific: false, re: /^[（(]\s*([一二三四五六七八九十]{1,3}|\d{1,3})\s*[）)]\s*/u },
     { id: 'num', specific: false, re: /^(\d{1,2})\s*[．.、]\s*(?=\S)/u },
     { id: 'let', specific: false, re: /^([A-Z])\s*[.．、]\s+(?=\S)/u },
   ];
@@ -2032,9 +2036,13 @@
           let inline = '';
           const lm = INLINE_LABEL_RE.exec(name);
           if (lm && sectionInfo(lm[1]).sec) { inline = line.trim().slice(line.trim().lastIndexOf(lm[0].trim())); name = name.slice(0, lm.index); }
+          let tail = '';
+          const mc = META_CUT_RE.exec(name);
+          if (mc && mc.index >= 2) { tail = name.slice(mc.index).trim(); name = name.slice(0, mc.index); }
           name = name.trim();
           if (name.length >= 2 && titleShape(name) && !META_HEAD_RE.test(name) && !NOISE_HEAD_RE.test(name)) {
-            found.push({ fam: o.fam, ord: o.ord, plain: plainText(line.replace(inline, '')), label: headingLabel(line.replace(inline, '')), inline, level: 0, para: true, from: pos, to: Math.min(md.length, nl + 1) });
+            const headPart = plain.slice(0, plain.length - o.rest.length) + name;      // “题号 + 题名”（不含并在后面的元信息）
+            found.push({ fam: o.fam, ord: o.ord, plain: plainText(headPart), label: headingLabel(headPart), inline, tail, level: 0, para: true, from: pos, to: Math.min(md.length, nl + 1) });
           }
         }
       }
@@ -2046,17 +2054,100 @@
       const o = ordOf(h.plain);
       if (o) { if (!headOrds.has(o.fam.id)) headOrds.set(o.fam.id, new Set()); headOrds.get(o.fam.id).add(o.ord); }
     }
-    return found.filter((c, i) => {
+    const byFam = new Map();
+    for (const c of found) { if (!byFam.has(c.fam.id)) byFam.set(c.fam.id, []); byFam.get(c.fam.id).push(c); }
+    const segHasCore = (list, c) => {
+      const nx = list[list.indexOf(c) + 1];
+      const kinds = blockKinds(md, c.to, nx ? nx.from : md.length);
+      return ['desc', 'in', 'out'].some((k) => kinds.has(k));
+    };
+    return found.filter((c) => {
       if (c.fam.specific) return true;
+      // 证据一：这份文档的题名本来用标题样式，中间缺了一个序号，正是这一行（原来的规则）
       const hs = headOrds.get(c.fam.id);
-      if (!hs || hs.size < 2) return false;
-      const max = Math.max.apply(null, Array.from(hs));
-      if (c.ord >= max || hs.has(c.ord)) return false;
-      // 同一个缺的序号可能有好几行（封面上的清单、正文里的题名）：取离“下一个序号”的标题最近的那一行
-      const nextHead = heads.filter((h) => { const o = ordOf(h.plain); return o && o.fam.id === c.fam.id && o.ord > c.ord; }).sort((a, b) => a.from - b.from)[0];
-      const rivals = found.filter((d) => d.fam === c.fam && d.ord === c.ord && d.from < nextHead.from);
-      return rivals[rivals.length - 1] === c;
+      if (hs && hs.size >= 2) {
+        const max = Math.max.apply(null, Array.from(hs));
+        if (c.ord < max && !hs.has(c.ord)) {
+          // 同一个缺的序号可能有好几行（封面上的清单、正文里的题名）：取离“下一个序号”的标题最近的那一行
+          const nextHead = heads.filter((h) => { const o = ordOf(h.plain); return o && o.fam.id === c.fam.id && o.ord > c.ord; }).sort((a, b) => a.from - b.from)[0];
+          if (nextHead) {
+            const rivals = found.filter((d) => d.fam === c.fam && d.ord === c.ord && d.from < nextHead.from);
+            if (rivals[rivals.length - 1] === c) return true;
+          }
+        }
+      }
+      // 证据二：同族序号在正文里成串出现（1.、2.、3.…，允许封面清单让序号重跑一轮），且这一行到下一个同族行之间有正文小节。
+      // 封面清单的行与行之间没有小节，过不了这一关；正文里普通的编号列表，也极少每一项后面都跟着“输入格式”。
+      const list = byFam.get(c.fam.id) || [];
+      const i = list.indexOf(c);
+      let run = 1;
+      for (let j = i - 1; j >= 0 && list[j].ord < list[j + 1].ord; j--) run++;
+      for (let j = i + 1; j < list.length && list[j].ord > list[j - 1].ord; j++) run++;
+      return run >= 2 && segHasCore(list, c);
     });
+  }
+
+  /**
+   * 再补一类候选：没有题号、也不是标题样式、独占一段的短行（模拟赛 PDF 里题名常常就长这样，
+   * 可能加粗、也可能和“源程序文件名：…”并成了一行）。要求：独占一段、形状像题名，
+   * 并且同一行带了元信息，或者紧跟着的几行里就有元信息行 / 小节标题 / 行首小节名
+   * （题目的开头就是这个长相）。是不是真的分界由 groupProblems 的“小节重复”校验决定：
+   * 单个误报顶多被并进当前那道题，不会凭空切出一道题来。have 是已有候选（同一行不重复收）。
+   */
+  function plainTitleCandidates(md, have) {
+    const taken = new Set((have || []).map((c) => c.from));
+    const rows = [];
+    let fence = 0;
+    let pos = 0;
+    while (pos <= md.length) {
+      let nl = md.indexOf('\n', pos);
+      if (nl < 0) nl = md.length;
+      const raw = md.slice(pos, nl);
+      const f = FENCE_RE.exec(raw);
+      let inFence = !!fence;
+      if (fence) { if (f && f[1].length >= fence && !f[2].trim()) fence = 0; }
+      else if (f) { fence = f[1].length; inFence = true; }
+      rows.push({ raw, from: pos, to: Math.min(md.length, nl + 1), inFence });
+      pos = nl + 1;
+    }
+    const out = [];
+    rows.forEach((r, i) => {
+      if (r.inFence || taken.has(r.from)) return;
+      const t = r.raw.trim();
+      if (!t || t.length > 120 || /^(?:[#|>]|[-*+]\s|%%)/.test(t)) return;
+      const alone = (nb) => !nb || !nb.raw.trim() || /^#{1,6}\s/.test(nb.raw.trim());
+      if (!alone(rows[i - 1]) || !alone(rows[i + 1])) return;                       // 要独占一段（邻居是空行或标题行）
+      // 紧跟在“题目描述”之类小节标题后面的第一行是正文（“给定一个图，求……”被并成一短行时形状也像题名），不是题名
+      for (let j = i - 1; j >= 0; j--) {
+        const pt = rows[j].raw.trim();
+        if (!pt) continue;
+        const phm = /^#{1,6}[ \t]+(.+)$/.exec(pt);
+        if (phm && sectionInfo(phm[1]).sec) return;
+        const plab = phm ? '' : leadingLabel(rows[j].raw);
+        if (plab && sectionInfo(plab).sec) return;
+        break;
+      }
+      let plain = plainText(t);
+      let tail = '';
+      const mc = META_CUT_RE.exec(plain);
+      if (mc && mc.index >= 2) { tail = plain.slice(mc.index).trim(); plain = plain.slice(0, mc.index).trim(); }
+      if (ordOf(plain)) return;                                                    // 带题号的归 titleLineCandidates 管
+      if (!titleShape(plain) || plain.length > 40 || /^[-=—–_]{2,}$/.test(plain)) return;
+      if (sectionInfo(plain).sec || META_HEAD_RE.test(plain) || NOISE_HEAD_RE.test(plain)) return;
+      let ok = !!tail;
+      let seen = 0;
+      for (let j = i + 1; !ok && j < rows.length && seen < 3; j++) {
+        const nt = rows[j].raw.trim();
+        if (!nt) continue;
+        seen++;
+        const hm = /^#{1,6}[ \t]+(.+)$/.exec(nt);
+        if (hm) ok = sectionInfo(hm[1]).sec;
+        else if (META_HEAD_RE.test(plainText(nt))) ok = true;
+        else { const lab = leadingLabel(rows[j].raw); if (lab && sectionInfo(lab).sec) ok = true; }
+      }
+      if (ok) out.push({ plain, label: headingLabel(plain), tail, level: 0, para: true, from: r.from, to: r.to });
+    });
+    return out;
   }
 
   const FENCE_RE = /^[ \t>]*(`{3,})([^`]*)$/;
@@ -2117,6 +2208,27 @@
    * 返回 { problems: [{ index, title, names, titles, score, level, from, to }], best, bestScore, bestTitle, ties }；
    * 不足两道题时 problems 为空；best 是与 title 最像的那道题的下标，相似度低于 PICK_MIN 时为 -1。
    */
+  /**
+   * 对着切片开头几行再比一次题名：题名有时不在标题行里（“第二题”独占一行，题名在下一行），
+   * 有时本题在 GOJ 上只有一个英文文件名（travel），真名只出现在“源程序文件名：travel.cpp”里。
+   * 只看前 6 行中形状像题名、或带文件名的短行，免得被正文里顺带提到的题目名骗过去。
+   */
+  function headLineScore(slice, title, pid) {
+    let best = 0;
+    const lines = String(slice || '').split('\n').map((x) => x.trim()).filter(Boolean).slice(0, 6);
+    for (const ln of lines) {
+      const plain = plainText(ln.replace(/^#{1,6}[ \t]+/, ''));
+      if (!plain || plain.length > 80) continue;
+      const hasFile = /(?:文件名|存盘名|程序名)/.test(plain);
+      if (!hasFile && !titleShape(plain)) continue;
+      best = Math.max(best, nameSimilarity(title, plain, pid));
+      for (const m of plain.matchAll(/\b([A-Za-z][\w-]{2,})\.(?:cpp|c|cc|in|out|pas|java|py)\b/g)) {
+        best = Math.max(best, nameSimilarity(title, m[1], pid));          // 文件名主干单独比一次，不被整行的分母拖低
+      }
+    }
+    return best;
+  }
+
   function findProblems(md, opts) {
     const none = { problems: [], best: -1, bestScore: 0, bestTitle: '', ties: 0 };
     const title = opts && opts.title;
@@ -2128,6 +2240,7 @@
       if (!sectionInfo(plain).sec && titleShape(plain) && !NOISE_HEAD_RE.test(plain) && !META_HEAD_RE.test(plain)) all.push(Object.assign({ plain, label: headingLabel(h.text) }, h));
     }
     all = all.concat(titleLineCandidates(md, all)).sort((a, b) => a.from - b.from);
+    all = all.concat(plainTitleCandidates(md, all)).sort((a, b) => a.from - b.from);
     if (all.length < 2) return none;
 
     // 层级先验：小节标题（题目描述 / 输入格式……）最常见的层级是 L；题名通常比小节标题大（层级更小）。
@@ -2135,7 +2248,7 @@
     // （视觉模型转写出来的标题全是同一级、题名与小节同级的文档，层级帮不上忙）。
     const secLevels = heads.filter((h) => { const si = sectionInfo(h.text); return si.sec && !(si.kinds.length === 1 && si.kinds[0] === 'sample'); }).map((h) => h.level);
     const L = secLevels.length ? mostCommon(secLevels, 1) : 0;
-    const top = L ? all.filter((c) => c.level < L) : all;
+    const top = L ? all.filter((c) => c.level > 0 && c.level < L) : all;   // 段落候选的 level 是 0（表示“不是标题行”），不能当作层级最高
     let groups = null;
     let cands = all;
     if (top.length >= 2 && top.length < all.length) {
@@ -2150,15 +2263,18 @@
       const next = groups[k + 1];
       const names = g.names.map((j) => cands[j].plain);
       const level = cands[g.names[g.names.length - 1]].level;
+      const from = first.from;
+      const to = next ? cands[next.names[0]].from : md.length;
+      const nameScore = title ? Math.max.apply(null, names.map((n) => nameSimilarity(title, n, pid))) : 0;
       return {
         index: k,
         names,
-        titles: g.names.map((j) => ({ para: !!cands[j].para, text: cands[j].label, inline: cands[j].inline || '' })),
+        titles: g.names.map((j) => ({ para: !!cands[j].para, text: cands[j].label, inline: cands[j].inline || '', tail: cands[j].tail || '' })),
         title: g.names.map((j) => cands[j].label).join(' '),
         level,
-        from: first.from,
-        to: next ? cands[next.names[0]].from : md.length,
-        score: title ? Math.max.apply(null, names.map((n) => nameSimilarity(title, n, pid))) : 0,
+        from,
+        to,
+        score: title ? Math.max(nameScore, headLineScore(md.slice(from, to), title, pid)) : 0,
       };
     });
     let best = 0;
@@ -2238,6 +2354,7 @@
       if (t && t.para) {
         lines.shift();
         if (!(opts && opts.dropTitle)) out0.push(`## ${t.text}`);
+        if (t.tail) out0.push('', t.tail);          // 和题名并在一行的元信息（源程序文件名…）也是这道题的一部分
         if (t.inline) out0.push('', t.inline);
       } else if (/^#{1,6}[ \t]+/.test(lines[0])) {
         const head = lines.shift();
@@ -3913,7 +4030,7 @@
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
-    PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
+    PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
     YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, searchYuantiji,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
