@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.11.0
+// @version      2.11.1
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接）
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -44,7 +44,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.11.0';
+  const VERSION = '2.11.1';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -1888,6 +1888,7 @@
     /^题\s*(?:[0-9]{1,2}|[一二三四五六七八九十]{1,3})(?![\d一二三四五六七八九十百])\s*[.．、:：)）\-—]*\s*/,
     /^[(（]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3}|[A-Za-z])\s*[)）.．、:：]\s*/,
     /^T\s*\d{1,3}\s*[.．、:：)）\-—]?\s*/,
+    /^(?:\d{1,3}|[A-Za-z])\s+/,
   ];
 
   /** 一个题名的各种“比较用写法”：原样 / 去题号 / 去括号里的英文名 / 只取括号里的名字 / 按 | / - 拆开。
@@ -2180,6 +2181,9 @@
     const t = line.trim();
     if (!t || /^(?:[-*+|>]|\d+[.)])\s/.test(t)) return '';
     if (t.length <= 30 && /^(?:\*\*.+\*\*|[【[].+[】\]]|.+[:：])$/.test(t)) return t.replace(/[:：]$/, '');
+    if (t.length <= 30 && sectionInfo(t).sec) return t;          // 整行就是小节名（没成标题行、没加粗记号的裸行，Word/LaTeX 卷子常见）
+    const bold = /^\*\*([^*]{1,24}?)\*\*/.exec(t);              // 段首加粗的小节名（“**题目描述** 给定一棵…”和正文同一行）
+    if (bold && sectionInfo(bold[1]).sec) return bold[1];
     const b = /^(?:\*\*)?[【[]\s*([^】\]]{1,20}?)\s*[】\]]/.exec(t) || /^(?:\*\*)?([^\s:：*|]{2,12})[:：]/.exec(t);
     return b ? b[1] : '';
   }
@@ -2229,6 +2233,84 @@
     return best;
   }
 
+  /**
+   * 兜底分题（findProblems 的常规路数认不出题名行时用）：一道题里“题目描述 / 输入 / 输出”各只出现一次，
+   * 它们再次出现的地方就是下一道题的开头——直接按这个循环切。每道的题名从开头往前找几行里像题名的短行
+   * （找不到就叫“第 k 题”，靠开头几行打分，实在对不上还能在面板下拉框里手动选）。
+   * 只在一类小节至少重复两次、且重复的种类 ≥2（或有一种出现 ≥3 次）时才动手，免得把单题误切。
+   * 返回 problems 数组（与 findProblems 同形）或 null。
+   */
+  function splitBySectionCycles(md, title, pid) {
+    const rows = [];
+    let fence = 0;
+    let pos = 0;
+    while (pos <= md.length) {
+      let nl = md.indexOf('\n', pos);
+      if (nl < 0) nl = md.length;
+      const raw = md.slice(pos, nl);
+      const f = FENCE_RE.exec(raw);
+      let inFence = !!fence;
+      if (fence) { if (f && f[1].length >= fence && !f[2].trim()) fence = 0; }
+      else if (f) { fence = f[1].length; inFence = true; }
+      const hm = inFence ? null : /^#{1,6}[ \t]+(.+?)[ \t]*$/.exec(raw);
+      const lab = inFence ? '' : (hm ? hm[1] : leadingLabel(raw));
+      const kinds = lab ? sectionInfo(lab).kinds : [];
+      rows.push({ raw, from: pos, to: Math.min(md.length, nl + 1), inFence, level: hm ? hm[0].indexOf(' ') : 0, kinds, rk: kinds.filter((k) => REPEAT_KINDS.includes(k)) });
+      pos = nl + 1;
+    }
+    const counts = { desc: 0, in: 0, out: 0 };
+    rows.forEach((r) => r.rk.forEach((k) => { counts[k]++; }));
+    const repeated = REPEAT_KINDS.filter((k) => counts[k] >= 2).length;
+    if (repeated < 2 && Math.max(counts.desc, counts.in, counts.out) < 3) return null;
+    const starts = [];
+    let seen = new Set();
+    rows.forEach((r, i) => {
+      if (!r.rk.length) return;
+      if (starts.length && r.rk.some((k) => seen.has(k))) { starts.push(i); seen = new Set(r.rk); return; }
+      if (!starts.length) starts.push(i);
+      r.rk.forEach((k) => seen.add(k));
+    });
+    if (starts.length < 2) return null;
+    // 每道题开头往前找题名行：跳过空行与元信息行，遇表格行 / 上一道题的小节行就停（再往前就是别人的地盘）
+    const lookback = (si) => {
+      let checked = 0;
+      for (let j = si - 1; j >= 0 && checked < 5; j--) {
+        const r = rows[j];
+        const t = r.raw.trim();
+        if (!t) continue;
+        if (r.inFence || t.startsWith('|') || r.kinds.length) return null;
+        checked++;
+        let plain = plainText(t.replace(/^#{1,6}[ \t]+/, ''));
+        if (META_HEAD_RE.test(plain)) continue;
+        let tail = '';
+        const mc = META_CUT_RE.exec(plain);
+        if (mc && mc.index >= 2) { tail = plain.slice(mc.index).trim(); plain = plain.slice(0, mc.index).trim(); }
+        if (plain.length <= 40 && titleShape(plain) && !sectionInfo(plain).sec && !NOISE_HEAD_RE.test(plain)) {
+          return { row: r, plain, label: headingLabel(plain), tail, para: !/^#{1,6}[ \t]/.test(t) };
+        }
+      }
+      return null;
+    };
+    const lbs = starts.map(lookback);
+    return starts.map((si, k) => {
+      const lb = lbs[k];
+      const from = lb ? lb.row.from : rows[si].from;
+      const to = k + 1 < starts.length ? (lbs[k + 1] ? lbs[k + 1].row.from : rows[starts[k + 1]].from) : md.length;
+      const names = lb ? [lb.plain] : [];
+      const nameScore = title && names.length ? nameSimilarity(title, names[0], pid) : 0;
+      return {
+        index: k,
+        names,
+        titles: lb ? [{ para: lb.para, text: lb.label, inline: '', tail: lb.tail }] : [],
+        title: lb ? lb.label : `第 ${k + 1} 题（没认出题名）`,
+        level: lb ? lb.row.level : 0,
+        from,
+        to,
+        score: title ? Math.max(nameScore, headLineScore(md.slice(from, to), title, pid)) : 0,
+      };
+    });
+  }
+
   function findProblems(md, opts) {
     const none = { problems: [], best: -1, bestScore: 0, bestTitle: '', ties: 0 };
     const title = opts && opts.title;
@@ -2241,7 +2323,16 @@
     }
     all = all.concat(titleLineCandidates(md, all)).sort((a, b) => a.from - b.from);
     all = all.concat(plainTitleCandidates(md, all)).sort((a, b) => a.from - b.from);
-    if (all.length < 2) return none;
+    // 常规路数分不出来时的兜底：直接按“描述/输入/输出”的循环切（题名行实在没认出来也能分）
+    const cycleFallback = () => {
+      const cyc = splitBySectionCycles(md, title, pid);
+      if (!cyc || cyc.length < 2) return Object.assign({}, none, { diag: `候选题名 ${all.length} 个` });
+      let bb = 0;
+      cyc.forEach((x, i) => { if (x.score > cyc[bb].score) bb = i; });
+      const t1 = cyc[bb];
+      return { problems: cyc, best: t1.score >= PICK_MIN ? bb : -1, bestScore: t1.score, bestTitle: t1.title, ties: cyc.filter((x) => x !== t1 && x.score >= t1.score - 0.02).length, via: 'cycle' };
+    };
+    if (all.length < 2) return cycleFallback();
 
     // 层级先验：小节标题（题目描述 / 输入格式……）最常见的层级是 L；题名通常比小节标题大（层级更小）。
     // 题目中间“不认识的小标题”（【棋子类型与走子规则】）和小节标题同级，先把层级 ≥ L 的排除；排除之后分不出题就退回全部候选
@@ -2257,7 +2348,7 @@
       if (g && g.every((x, k) => !repeatsInside(md, top[x.names[0]].from, g[k + 1] ? top[g[k + 1].names[0]].from : md.length))) { groups = g; cands = top; }
     }
     if (!groups) groups = groupProblems(md, all);
-    if (!groups) return none;
+    if (!groups) return cycleFallback();
     const problems = groups.map((g, k) => {
       const first = cands[g.names[0]];
       const next = groups[k + 1];
@@ -3412,7 +3503,7 @@
     const found = findProblems(rawBody, { title: job.title, pid: job.pid });
     // 看起来有好几道题（“输入 / 输出”之类的小节重复出现），却没能分出每道题：不要悄悄复制整份，说一声
     if (found.problems.length < 2 && (!job.cfg || job.cfg.pick !== false) && looksMultiProblem(rawBody)) {
-      notes.push(`这份 PDF 里好像有好几道题（“输入 / 输出”之类的小节出现了多次），但没能认出每道题的分界，所以复制了整份，请自己删掉不属于这道题的部分；可以${aiHint}试试（模型转写出来的标题更规整，更容易分题）`);
+      notes.push(`这份 PDF 里好像有好几道题（“输入 / 输出”之类的小节出现了多次），但没能认出每道题的分界，所以复制了整份，请自己删掉不属于这道题的部分；可以${aiHint}试试（模型转写出来的标题更规整，更容易分题）${found.diag ? `。诊断：${found.diag}（把这一行和复制出来的前几行发给作者，能帮着改进分题）` : ''}`);
     }
     const aiCount = Array.from(aiOut.values()).filter((o) => !o.error).length;
     const holeTex = Array.from(holeInfo.values()).filter((v) => v.tex).length;
@@ -4030,7 +4121,7 @@
     classifyFont, normChars, spansFromTextContent, pageTextStats, clusterLines, wrapMath, toLatex, layoutDocument, recognizePdf,
     paintedBoxes, isGlyphBox, findHoles, markHoles, applyHoles, resolveHoles, parseStripReply, cleanSnippet,
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
-    PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
+    PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
     YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, searchYuantiji,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,

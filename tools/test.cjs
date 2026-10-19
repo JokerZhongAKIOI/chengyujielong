@@ -1058,6 +1058,46 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(byEn.best, 1, '站上只叫 travel 时也要对上第二题');
   });
 
+  test('多道题抠题：小节名是裸行 / 段首加粗（没成标题行）时也分得出来', () => {
+    const names = ['字典树', '经典老番', '扫雷游戏'];
+    const bodies = ['给定一棵字典树，支持插入和查询。', '给定一排区间做操作。', '输出扫雷的答案。'];
+    // 题名是 ##，小节是独占一行的裸文本（黑体没被字体名认成粗体、字号与正文一样时的典型产物）
+    const bare = names.map((n, i) => [`## ${n}`, '题目描述', bodies[i], '输入格式', '第一行一个整数。', '输出格式', '一行答案。'].join('\n\n')).join('\n\n');
+    const r = plugin.findProblems(bare, { title: '字典树', pid: 'TR0098' });
+    assert.strictEqual(r.problems.length, 3, '裸行小节也要能数出“描述/输入/输出”的循环');
+    assert.strictEqual(r.best, 0);
+    // 题名和小节全是裸行
+    const allBare = names.map((n, i) => [n, '题目描述', bodies[i], '输入格式', '第一行一个整数。', '输出格式', '一行答案。'].join('\n\n')).join('\n\n');
+    assert.strictEqual(plugin.findProblems(allBare, { title: '字典树', pid: 'TR0098' }).best, 0);
+    // 小节名是段首加粗前缀，和正文同一行
+    const boldPre = names.map((n, i) => [`## ${n}`, `**题目描述** ${bodies[i]}`, '**输入格式** 第一行一个整数。', '**输出格式** 一行答案。'].join('\n\n')).join('\n\n');
+    const r3 = plugin.findProblems(boldPre, { title: '经典老番', pid: 'TR0099' });
+    assert.strictEqual(r3.problems.length, 3);
+    assert.strictEqual(r3.best, 1);
+  });
+
+  test('多道题抠题：正文没有题名行时按小节循环兜底切，编号小节的题名计分不再被数字压低', () => {
+    const names = ['字典树', '经典老番', '扫雷游戏'];
+    const bodies = ['给定一棵字典树。', '给定一排区间。', '输出扫雷答案。'];
+    // 题名只在封面表里、正文直接从题目描述开始：切得开（下拉框里能手动选），只是对不上号
+    const noTitles = names.map((n, i) => ['## 题目描述', bodies[i], '## 输入格式', '第一行一个整数。', '## 输出格式', '一行答案。'].join('\n\n')).join('\n\n');
+    const r = plugin.findProblems(noTitles, { title: '字典树', pid: 'TR0098' });
+    assert.strictEqual(r.problems.length, 3, '按小节循环也该切出三道');
+    assert.strictEqual(r.best, -1, '没认出题名就不该硬选一道');
+    assert.ok(/第 1 题/.test(r.problems[0].title));
+    const sl = plugin.sliceProblem(noTitles, r.problems[1], {});
+    assert.ok(sl.includes('一排区间') && !sl.includes('一棵字典树'));
+    // LaTeX 编号标题 “1 字典树” vs 本题“字典树”：去序号后应满分，而不是被数字打折到及格线
+    const numbered = names.map((n, i) => [`## ${i + 1} ${n}`, `### ${i + 1}.1 题目描述`, bodies[i], `### ${i + 1}.2 输入格式`, 'x。', `### ${i + 1}.3 输出格式`, 'y。'].join('\n\n')).join('\n\n');
+    const r2 = plugin.findProblems(numbered, { title: '字典树', pid: 'TR0098' });
+    assert.strictEqual(r2.best, 0);
+    assert.ok(r2.bestScore >= 0.99, `编号题名计分该接近满分，实际 ${r2.bestScore}`);
+    // 连循环都切不出来时要带诊断，方便对着真实卷子继续改
+    const r3 = plugin.findProblems('## 只有一题\n\n## 题目描述\n\n正文。', { title: '只有一题', pid: 'P1' });
+    assert.strictEqual(r3.problems.length, 0);
+    assert.ok(/候选题名/.test(r3.diag || ''), `诊断里要写候选数：${r3.diag}`);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
