@@ -1184,10 +1184,197 @@ ${JSON.stringify([['wrb.fr', 'MkEWBc', null, null, null, null, 'generic']])}`), 
       assert.ok(html.includes('<strong>bold</strong>'), 'Markdown 加粗生效');
       assert.ok(!html.includes('<img'), `原文里的 HTML 必须只被转义、不能进 DOM：${html.slice(0, 200)}`);
       assert.ok(html.includes('target="_blank"'), '外链新窗口打开（照阅读器的 link_open 处理）');
+      // 回归：预览里 $n$ 显示成 nn、整串约束重复一遍——KaTeX 默认输出 MathML+HTML 两层，
+      // CSS 没进 Shadow DOM 时 MathML 没被隐藏。预览必须只留 HTML 视觉层。
+      const dupHtml = plugin.renderBriefHtml('有 $n$ 个硬币，其中 $1 \\le n, k \\le 10^{18}$。');
+      assert.ok(!dupHtml.includes('katex-mathml') && !dupHtml.includes('<math'), '不能再输出 MathML 层（会与 HTML 层重复显示）');
+      assert.strictEqual((dupHtml.match(/class="katex"/g) || []).length, 2, '两处公式各渲染一次');
+      assert.strictEqual((dupHtml.match(/katex-html/g) || []).length, 2, '每处公式只留一层 HTML');
+      const css = plugin.katexCssForInline('@font-face{src:url(fonts/KaTeX_Main.woff2)}@font-face{src:url("fonts/KaTeX_AMS.woff")}');
+      assert.ok(css.includes('url(https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/fonts/KaTeX_Main.woff2)'), css);
+      assert.ok(css.includes('url("https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/fonts/KaTeX_AMS.woff")'), css);
     } finally {
       delete global.markdownit;
       delete global.katex;
     }
+  });
+
+  test('面板布局钳制与简要题面配置清洗：坏布局不采纳，来源/语言只认白名单', () => {
+    assert.deepStrictEqual(
+      plugin.clampPanelLayout({ x: -50, y: 999, w: 20, h: 9999 }, { width: 800, height: 600 }),
+      { x: 8, y: 8, w: 340, h: 584 },
+      '宽高补到最小值/截到视口内，位置也拉回视口',
+    );
+    assert.deepStrictEqual(
+      plugin.clampPanelLayout({ x: 900, y: -4, w: 1000, h: 20 }, 800, 600),
+      { x: 8, y: 8, w: 784, h: 260 },
+      '也支持 (宽, 高) 两个数字的视口写法',
+    );
+    assert.deepStrictEqual(
+      plugin.clampPanelLayout({ x: 40, y: 40, w: 340, h: 260 }, { width: 320, height: 200 }),
+      { x: 8, y: 8, w: 304, h: 184 },
+      '小窗口里不能硬塞 340×260，要缩到可用区域',
+    );
+    assert.strictEqual(plugin.clampPanelLayout(null, { width: 800, height: 600 }), null);
+    assert.strictEqual(plugin.clampPanelLayout({ x: 'x', y: 1, w: 2, h: 3 }, { width: 800, height: 600 }), null);
+    assert.strictEqual(plugin.DEFAULT_CFG.briefSource, 'yuantiji');
+    assert.strictEqual(plugin.DEFAULT_CFG.briefLang, 'zh');
+    const bad = plugin.loadConfig({ get: () => ({ briefSource: 'BAD', briefLang: 'bad' }) });
+    assert.strictEqual(bad.briefSource, 'yuantiji', '非法简要来源回落原题机');
+    assert.strictEqual(bad.briefLang, 'zh', '非法简要语言回落中文');
+    const ok = plugin.loadConfig({ get: () => ({ briefSource: 'api', briefLang: 'en' }) });
+    assert.strictEqual(ok.briefSource, 'api');
+    assert.strictEqual(ok.briefLang, 'en');
+  });
+
+  test('其它 OJ 题面提取：洛谷结构化数据、CF $$$ 公式、AtCoder 英文、HDU/POJ/SPOJ 老版式都取得到', () => {
+    const { JSDOM } = require('jsdom');
+    const fromHtml = (url, html) => {
+      const dom = new JSDOM(html, { url });
+      return plugin.siteStatement(dom.window.document, dom.window.location);
+    };
+    const longZh = '给定一个长度为 $n$ 的数组 $a$。每次操作可以选择一个下标并把对应元素修改为任意整数，求使数组满足题目给定条件的最小操作次数。输入包含多组测试数据，必须完整保留所有数据范围、特殊条件与输入输出约定。';
+    const luoData = { data: { problem: { description: longZh, formatI: '第一行输入整数 $n$，第二行输入数组。', formatO: '输出最小操作次数。', samples: [['3\n1 3 2', '1']], hint: '$1\\le n\\le 2\\times10^5$。', title: '数组操作', pid: 'P1001' } } };
+    const luo = fromHtml('https://www.luogu.com.cn/problem/P1001', `<script id="lentille-context" type="application/json">${JSON.stringify(luoData)}</script><h2 class="title">P1001 数组操作</h2>`);
+    assert.ok(luo && luo.site.id === 'luogu' && luo.source === '#lentille-context 数据', JSON.stringify(luo));
+    assert.deepStrictEqual({ pid: luo.meta.pid, title: luo.meta.title }, { pid: 'P1001', title: '数组操作' });
+    assert.ok(luo.markdown.includes('## 输入格式') && luo.markdown.includes('## 样例输入 1') && !luo.markdown.includes('"description"'), luo.markdown);
+
+    const cf = fromHtml('https://codeforces.com/problemset/problem/1730/C', `<div class="problem-statement"><div class="header"><div class="title">C. Even Number Addicts</div></div><div><p>Given $$$n$$$ numbers and $$$a_i$$$. ${'You may perform an operation and need to determine the winner under optimal play. '.repeat(3)}</p></div></div>`);
+    assert.ok(cf && cf.site.id === 'codeforces' && cf.meta.pid === '1730C', JSON.stringify(cf));
+    assert.ok(cf.markdown.includes('Given $n$ numbers and $a_i$.') && !cf.markdown.includes('$$$'), cf.markdown);
+
+    const at = fromHtml('https://atcoder.jp/contests/abc123/tasks/abc123_d', `<h2>D - Cake</h2><div id="task-statement"><div class="lang-ja"><p>${'日本語の文です。'.repeat(30)}</p></div><div class="lang-en"><p>${'Given a cake cut into pieces, determine the maximum total sweetness under the stated constraints. '.repeat(3)}</p></div></div>`);
+    assert.ok(at && at.site.id === 'atcoder' && at.meta.pid === 'abc123_d' && at.source === '#task-statement .lang-en', JSON.stringify(at));
+    assert.ok(at.markdown.includes('maximum total sweetness') && !at.markdown.includes('日本語'), at.markdown);
+
+    const hdu = fromHtml('https://acm.hdu.edu.cn/showproblem.php?pid=1000', `<h1>A + B Problem</h1><div class="panel_content"><p>${'Calculate A+B for several pairs of integers. '.repeat(4)}</p></div><div class="panel_content"><p>Each line contains two integers A and B.</p></div>`);
+    assert.ok(hdu && hdu.site.id === 'hdu' && hdu.meta.pid === '1000' && hdu.source === '.panel_content ×2', JSON.stringify(hdu));
+    assert.ok(hdu.markdown.includes('Each line contains two integers'), hdu.markdown);
+
+    const poj = fromHtml('http://poj.org/problem?id=1000', `<table><tr><td><div class="ptt">A+B Problem</div><p class="pst">Description</p><p>${'Calculate the sum of two integers for every input pair and print each result. '.repeat(3)}</p><p class="pst">Input</p><p>Two integers per line.</p></td></tr></table>`);
+    assert.ok(poj && poj.site.id === 'poj' && poj.meta.pid === '1000' && poj.source === 'p.pst 所在单元格', JSON.stringify(poj));
+
+    const spoj = fromHtml('https://www.spoj.com/problems/TEST/', `<h1 id="problem-name">TEST - Life, the Universe, and Everything</h1><div id="problem-body"><p>${'Read integers and print each one until the value 42 appears, which itself must not be printed. '.repeat(2)}</p></div>`);
+    assert.ok(spoj && spoj.site.id === 'spoj' && spoj.meta.pid === 'TEST' && spoj.source === '#problem-body', JSON.stringify(spoj));
+    assert.strictEqual(plugin.detectSite(new URL('https://www.goj.wiki/p/P1')), null, 'GOJ 本站不算其它 OJ');
+  });
+
+  await testAsync('自配 API 简要题面：提示词限长、回复兼容 JSON/标题/单段，没配 API 时说清改法', async () => {
+    const zhPrompt = plugin.briefPrompt(`HEAD${'x'.repeat(16000)}TAIL`, { pid: 'P1', title: '测试' }, 'zh');
+    assert.ok(zhPrompt.includes('必须全部用中文输出') && zhPrompt.includes('[题面过长，中间略去一部分]') && zhPrompt.includes('HEAD') && zhPrompt.includes('TAIL'), zhPrompt.slice(0, 260));
+    assert.ok(plugin.briefPrompt('题面', { pid: 'P1', title: '测试' }, 'en').includes('Write the entire answer in English'));
+    assert.deepStrictEqual(plugin.parseBriefReply('### 简要题面\n完整版。\n\n### 更简版题意\n短版。'), { t0: '完整版。', t1: '短版。' });
+    assert.deepStrictEqual(plugin.parseBriefReply('```json\n{"t0":"Full brief.","t1":"Short brief."}\n```'), { t0: 'Full brief.', t1: 'Short brief.' });
+    assert.deepStrictEqual(plugin.parseBriefReply('只有一段完整简要题面。'), { t0: '只有一段完整简要题面。', t1: '' });
+
+    const reqs = [];
+    const got = await plugin.generateBrief(cfgWithApi({ briefSource: 'api', briefLang: 'en' }), 'Statement '.repeat(40), { pid: 'A1', title: 'Test' }, {
+      http: async (opts) => {
+        reqs.push(opts);
+        return { status: 200, text: JSON.stringify({ choices: [{ message: { content: '```json\n{"t0":"Full brief.","t1":"Short brief."}\n```' }, finish_reason: 'stop' }] }) };
+      },
+    });
+    assert.deepStrictEqual(got, { rewrites: { t0: 'Full brief.', t1: 'Short brief.' }, lang: 'en', model: 'fake-vl' });
+    assert.strictEqual(reqs.length, 1);
+    assert.ok(JSON.parse(reqs[0].data).messages[0].content[0].text.includes('Write the entire answer in English'));
+    const err = await plugin.generateBrief(plugin.DEFAULT_CFG, 'x'.repeat(100), {}, { http: async () => { throw new Error('没配好就不该发请求'); } }).catch((e) => e);
+    assert.strictEqual(err.code, 'NO_CONFIG');
+    assert.ok(/切回原题机/.test(err.message), err.message);
+    const md = plugin.briefMarkdown({ t0: '中文完整', t1: '中文短版' }, { pid: 'P1', title: '题' }, { source: 'api', lang: 'zh', model: 'fake-vl' });
+    assert.ok(md.includes('由你配置的模型（fake-vl）直接重写成中文'), md);
+    const mdTr = plugin.briefMarkdown({ t0: '中文完整', t1: '' }, { pid: 'P1', title: '题' }, { source: 'api', lang: 'zh', model: 'fake-vl', translated: true });
+    assert.ok(mdTr.includes('重写（英文）后经 Google 翻译译成中文'), mdTr);
+  });
+
+  await testAsync('其它 OJ 只生成简要题面：searchOriginal 也转 brief，不填结果框、不复制整份原题、不读 PDF', async () => {
+    const { JSDOM } = require('jsdom');
+    const stmt = `Given $$$n$$$ numbers and $$$a_i$$$. ${'You may perform an operation and need to determine the winner under optimal play. '.repeat(4)}`;
+    const html = `<div class="problem-statement"><div class="header"><div class="title">C. Even Number Addicts</div></div><div><p>${stmt}</p></div></div>`;
+    const make = (cfg, http) => {
+      const dom = new JSDOM(html, { url: 'https://codeforces.com/problemset/problem/1730/C' });
+      const store = new Map();
+      store.set(plugin.CFG_KEY, cfg);
+      const logs = [];
+      const foundCalls = [];
+      const resultCalls = [];
+      let copied = 0;
+      let loaded = 0;
+      const runner = plugin.createRunner({
+        doc: dom.window.document,
+        loc: dom.window.location,
+        storage: { get: (k, d) => (store.has(k) ? store.get(k) : d), set: (k, v) => store.set(k, v) },
+        ui: { log: (...a) => logs.push(a.join(' ')), state: () => {}, result: (x) => resultCalls.push(x), picks: () => {}, found: (x) => foundCalls.push(x) },
+        loadPdf: async () => { loaded++; throw new Error('其它 OJ 不该读 PDF'); },
+        sleep: async () => {},
+        copy: async () => { copied++; return true; },
+        http,
+      });
+      return { runner, logs, foundCalls, resultCalls, stats: () => ({ copied, loaded }) };
+    };
+
+    const reqsY = [];
+    const y = make(Object.assign({}, plugin.DEFAULT_CFG, { briefSource: 'yuantiji' }), async (opts) => {
+      reqsY.push(opts);
+      return { status: 200, text: JSON.stringify({ results: [{ uid: 'CodeForces/1A', title: 'Should hide', src: 'CodeForces', url: 'https://codeforces.com/problemset/problem/1/A', cos: 0.99, t0: 'row brief' }], rewrites: { t0: 'Site brief.', t1: 'Short.' }, reranked: true, timing: { total: 1.2 } }) };
+    });
+    const outY = await y.runner.searchOriginal();
+    assert.strictEqual(reqsY.length, 1);
+    assert.strictEqual(reqsY[0].url, plugin.YUANTIJI_API);
+    const bodyY = JSON.parse(reqsY[0].data);
+    assert.deepStrictEqual({ k: bodyY.k, rewrite: bodyY.rewrite, rerank: bodyY.rerank, skip_short: bodyY.skip_short }, { k: 3, rewrite: true, rerank: true, skip_short: true });
+    assert.ok(bodyY.query.includes('Given $n$ numbers'), bodyY.query.slice(0, 120));
+    assert.strictEqual(outY.briefOnly, true);
+    assert.strictEqual(outY.source, 'yuantiji');
+    assert.deepStrictEqual(outY.rows, [], '其它 OJ 即使原题机返回 rows 也不展示搜原题列表');
+    assert.deepStrictEqual(y.foundCalls[y.foundCalls.length - 1].rewrites, { t0: 'Site brief.', t1: 'Short.' });
+    assert.ok(!y.runner.getLast() && y.resultCalls.length === 0 && y.stats().copied === 0 && y.stats().loaded === 0, '不能把整份原题写进结果、复制或读 PDF');
+    assert.ok(y.logs.some((l) => /只用来生成简要题面/.test(l)), y.logs.join(' ｜ '));
+
+    const reqsA = [];
+    const a = make(cfgWithApi({ briefSource: 'api', briefLang: 'zh' }), async (opts) => {
+      reqsA.push(opts);
+      return { status: 200, text: JSON.stringify({ choices: [{ message: { content: '### 简要题面\n给定数组，求最少修改次数。\n\n### 更简版题意\n最少改几个数。' }, finish_reason: 'stop' }] }) };
+    });
+    const outA = await a.runner.brief();
+    assert.strictEqual(reqsA.length, 1);
+    assert.strictEqual(reqsA[0].url, 'https://example.com/v1/chat/completions');
+    assert.ok(JSON.parse(reqsA[0].data).messages[0].content[0].text.includes('必须全部用中文输出'));
+    assert.strictEqual(outA.source, 'api');
+    assert.strictEqual(outA.model, 'fake-vl');
+    assert.ok(outA.briefMd.includes('由你配置的模型（fake-vl）直接重写成中文'), outA.briefMd);
+    assert.ok(!a.runner.getLast() && a.resultCalls.length === 0 && a.stats().copied === 0 && a.stats().loaded === 0);
+  });
+
+  await testAsync('GOJ 上点“简要题面”走自配 API 时，只生成简要区，不触发搜原题结果列表', async () => {
+    const { JSDOM } = require('jsdom');
+    const stmt = '给定长度为 n 的序列 a，每次可以把一个数加一或减一，求把它变成不下降序列的最小操作次数。'.repeat(3);
+    const dom = new JSDOM(`<div class="problem-content"><h1 class="section__title">P9999. 测试题</h1><div class="section__body typo richmedia" data-fragment-id="problem-description"><h2>题目描述</h2><p>${stmt}</p></div></div>`, { url: 'https://www.goj.wiki/p/P9999' });
+    const store = new Map();
+    store.set(plugin.CFG_KEY, cfgWithApi({ briefSource: 'api', briefLang: 'en' }));
+    const reqs = [];
+    const foundCalls = [];
+    const runner = plugin.createRunner({
+      doc: dom.window.document,
+      loc: dom.window.location,
+      storage: { get: (k, d) => (store.has(k) ? store.get(k) : d), set: (k, v) => store.set(k, v) },
+      ui: { log: () => {}, state: () => {}, result: () => {}, picks: () => {}, found: (x) => foundCalls.push(x) },
+      loadPdf: async () => { throw new Error('没有 PDF，不该读'); },
+      sleep: async () => {},
+      copy: async () => true,
+      http: async (opts) => {
+        reqs.push(opts);
+        return { status: 200, text: JSON.stringify({ choices: [{ message: { content: '### 简要题面\nGiven an array, find the minimum increments.\n\n### 更简版题意\nMake it non-decreasing.' }, finish_reason: 'stop' }] }) };
+      },
+    });
+    const out = await runner.brief();
+    assert.strictEqual(reqs.length, 1);
+    assert.strictEqual(reqs[0].url, 'https://example.com/v1/chat/completions', '不该发给 yuantiji');
+    assert.strictEqual(out.mode, 'brief');
+    assert.strictEqual(out.source, 'api');
+    assert.strictEqual(out.lang, 'en');
+    assert.deepStrictEqual(out.rows, []);
+    assert.strictEqual(foundCalls[foundCalls.length - 1].briefOnly, true);
   });
 
   console.log('\n# 静态检查');
@@ -1197,6 +1384,15 @@ ${JSON.stringify([['wrb.fr', 'MkEWBc', null, null, null, null, 'generic']])}`), 
     new vm.Script(src, { filename: 'goj-pdf-to-markdown.user.js' });
     const headerVer = /^\/\/ @version\s+(\S+)/m.exec(src)[1];
     assert.strictEqual(headerVer, plugin.VERSION, '@version 与 VERSION 不一致');
+  });
+  await testAsync('v2.16.0 的脚本头与接线都在：多 OJ @match、KaTeX CSS 资源、面板布局持久化', () => {
+    for (const host of ['www.luogu.com.cn/problem/', 'codeforces.com/contest/', 'atcoder.jp/contests/', 'loj.ac/p/', 'ac.nowcoder.com/acm/problem/', 'acm.hdu.edu.cn/showproblem.php', 'poj.org/problem', 'qoj.ac/problem/', 'uoj.ac/problem/', 'www.spoj.com/problems/', 'www.codechef.com/problems/']) {
+      assert.ok(src.includes(host), `脚本头缺少 ${host} 的 @match`);
+    }
+    assert.ok(src.includes('// @resource     katexCss https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.css'), 'KaTeX CSS 要作为油猴资源内联，不能只靠页面外链');
+    assert.ok(src.includes('// @grant        GM_getResourceText'), '取 @resource 文本需要 GM_getResourceText 授权');
+    assert.ok(src.includes("const PANEL_KEY = 'panel_v1'") && src.includes('storage.get(PANEL_KEY, null)') && src.includes('storage.set(PANEL_KEY, layout)'), '面板位置/大小要读回并保存');
+    assert.ok(!/html2pdf|📄/.test(src), '已取消的 PDF 下载功能不要悄悄回来');
   });
   await testAsync('设置面板里用到的每个 id 都在 UI_HTML 里存在（新增的复选框别写错名字）', () => {
     const ids = new Set();

@@ -1,14 +1,47 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.14.0
-// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，可一键用 Google 翻译成中文，并可渲染成带公式排版的预览
+// @version      2.16.0
+// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面；悬浮面板可拖动、可拉伸并记住位置和大小；还可以把题面发给原题机 yuantiji.ac 搜原题，或改用自己配置的 API 生成简要题面（中/英）；在常见 OJ（洛谷、Codeforces、AtCoder、LibreOJ、牛客、HDU、POJ、QOJ、UOJ、SPOJ、CodeChef 等）只提供同样的简要题面小面板
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
 // @match        *://www.goj.wiki/d/*/contest/*/p/*
 // @match        *://www.goj.wiki/d/*/homework/*/p/*
 // @match        *://www.goj.wiki/d/*/training/*
 // @match        *://www.goj.wiki/training/*
+// @match        *://www.luogu.com.cn/problem/*
+// @match        *://www.luogu.com/problem/*
+// @match        *://codeforces.com/contest/*/problem/*
+// @match        *://codeforces.com/problemset/problem/*/*
+// @match        *://codeforces.com/gym/*/problem/*
+// @match        *://codeforces.com/group/*/contest/*/problem/*
+// @match        *://*.codeforces.com/contest/*/problem/*
+// @match        *://atcoder.jp/contests/*/tasks/*
+// @match        *://loj.ac/p/*
+// @match        *://ac.nowcoder.com/acm/problem/*
+// @match        *://ac.nowcoder.com/acm/contest/*/*
+// @match        *://ac.nowcoder.com/pat/*/problem/*
+// @match        *://acm.hdu.edu.cn/showproblem.php*
+// @match        *://acm.hdu.edu.cn/contest_showproblem.php*
+// @match        *://hdu.ac.cn/showproblem.php*
+// @match        *://hdu.ac.cn/contest_showproblem.php*
+// @match        *://acm.hdu.edu.cn/contest/problem*
+// @match        *://acm.hdu.edu.cn/problem/*
+// @match        *://poj.org/problem*
+// @match        *://qoj.ac/contest/*/problem/*
+// @match        *://qoj.ac/problem/*
+// @match        *://uoj.ac/contest/*/problem/*
+// @match        *://uoj.ac/problem/*
+// @match        *://www.spoj.com/problems/*
+// @match        *://www.spoj.com/problems/*/
+// @match        *://www.codechef.com/problems/*
+// @match        *://www.codechef.com/*/problems/*
+// @match        *://www.codechef.com/submit/*
+// @match        *://www.codechef.com/*/submit/*
+// @match        *://vjudge.net/problem/*
+// @match        *://darkbzoj.cc/problem/*
+// @match        *://www.bzoj.com/problem/*
+// @match        *://www.darkbzoj.cn/problem/*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -16,11 +49,13 @@
 // @grant        GM_setValue
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
+// @grant        GM_getResourceText
 // @connect      *
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js#sha256=5b5799e6f8c680663207ac5b42ee14eed2a406fa7af48f50c154f0c0b1566946
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js#sha256=feabdf309770ed24bba31a5467836cdc8cf639c705af27d52b585b041bb8527b
 // @require      https://cdn.jsdelivr.net/npm/markdown-it@15.0.3/dist/browser/markdown-it.umd.min.js#sha256=391f2aa638e75e6c7859d0a5c5650ef0956722a45998f17e05b83bc655778e1e
 // @require      https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.js#sha256=103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7
+// @resource     katexCss https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.css
 // ==/UserScript==
 
 /*
@@ -39,6 +74,9 @@
  *      以及按 uid（Source/题号）拼出的 VJudge 链接。结果不会混进题面 Markdown，要复制用结果区的“复制结果”。
  *      同一次搜索还会带回原题机给本题重写的简要题面（英文），点“📝 简要题面”可单独查看 / 单独复制，
  *      简要题面区里还能一键用 Google 翻译成中文（点了才发）、一键渲染预览（Markdown + LaTeX 排版后读）。
+ *   6. （v2.16.0）面板的标题栏可拖动位置、右下角可拉伸宽高，位置和大小会记在本机；在洛谷、Codeforces、
+ *      AtCoder、LibreOJ、牛客、HDU、POJ、QOJ、UOJ、SPOJ、CodeChef、VJudge 等站的题目页则只显示简要题面小面板：
+ *      点击后才抓取当前页面，再交给原题机或用户自配的 API 生成，不自动外发，也不复制整份原题面。
  *
  * 本文件被 Node 测试以 require() 方式加载时只导出纯函数（见文件末尾），不会触碰 DOM / GM_*。
  */
@@ -48,9 +86,10 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.14.0';
+  const VERSION = '2.16.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
+  const PANEL_KEY = 'panel_v1';        // 悬浮面板的位置与宽高（左上角 + 宽高）
   const CACHE_KEY = 'cache_v2';
   const OLD_CACHE_KEY = 'cache_v1';         // 1.x 的图片转写缓存，启动时清掉
   const CACHE_MAX = 120;
@@ -94,7 +133,7 @@
   const YUANTIJI_MIN_QUERY = 12;                            // 题面文字短于此数基本是没取到文字，搜了也是白搜
   const EMPTY_API = { apiUrl: '', apiKey: '', model: '', extraBody: '' };   // 一套接口（主 / 备用）
   // alt：备用接口（没配就是空壳）；useAlt：当前先用哪一套（两套都填好时可以来回切）
-  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', alt: null, useAlt: false, auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true, findAuto: false };
+  const DEFAULT_CFG = { apiUrl: '', apiKey: '', model: '', extraBody: '', alt: null, useAlt: false, auto: true, concurrency: 2, engine: 'auto', pick: true, listAuto: true, listGap: LIST_GAP_MS, listEach: false, holeImages: true, findAuto: false, briefSource: 'yuantiji', briefLang: 'zh' };
 
   const PRESETS = [
     { id: 'zhipu', name: '智谱 GLM-4.6V-Flash（免费）', apiUrl: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4.6v-flash', extraBody: '{"thinking":{"type":"disabled"}}',
@@ -433,6 +472,15 @@
       const t = el.textContent.trim();
       return cl.contains('katex-block') ? `\n\n$$\n${t}\n$$\n\n` : `$${t}$`;
     }
+    // MathJax v3 renders each formula as <mjx-container>; its assistive MathML still carries
+    // an <annotation> with the original TeX. Plain MathML <math> can provide the same source.
+    if (tag === 'mjx-container' || tag === 'math') {
+      const t = texOf(el);
+      if (t) {
+        const display = el.getAttribute('display') === 'block' || (el.getAttribute('jax') || '').toLowerCase() === 'chtml' && !!el.querySelector('mjx-math[display="block"]');
+        return texMarkup(t, display);
+      }
+    }
 
     switch (tag) {
       case 'br': return '  \n';
@@ -678,6 +726,236 @@
     return `${tidy(`${buildHeader(meta)}\n\n${body}`)}\n`;
   }
 
+
+
+  /* ====================================================================== *
+   * 1a. 其它 OJ 的题面抓取（只用于生成简要题面，不展示/复制整份原题）
+   * ====================================================================== */
+  const PANEL_MIN_W = 340;
+  const PANEL_MIN_H = 260;
+  const PANEL_MARGIN = 8;
+
+  /** Clamp a saved panel rectangle into the current viewport; invalid input -> null. */
+  function clampPanelLayout(layout, viewport, viewportH) {
+    if (!layout || typeof layout !== 'object') return null;
+    const W = Number(viewport && typeof viewport === 'object' ? (viewport.width || viewport.innerWidth) : viewport);
+    const H = Number(viewport && typeof viewport === 'object' ? (viewport.height || viewport.innerHeight) : viewportH);
+    const x = Number(layout.x); const y = Number(layout.y); const w0 = Number(layout.w); const h0 = Number(layout.h);
+    if (![W, H, x, y, w0, h0].every(Number.isFinite) || W <= 0 || H <= 0) return null;
+    const maxW = Math.max(160, W - PANEL_MARGIN * 2);
+    const maxH = Math.max(160, H - PANEL_MARGIN * 2);
+    const w = Math.round(Math.min(Math.max(w0, Math.min(PANEL_MIN_W, maxW)), maxW));
+    const h = Math.round(Math.min(Math.max(h0, Math.min(PANEL_MIN_H, maxH)), maxH));
+    const maxX = Math.max(PANEL_MARGIN, W - w - PANEL_MARGIN);
+    const maxY = Math.max(PANEL_MARGIN, H - h - PANEL_MARGIN);
+    return {
+      x: Math.round(Math.min(Math.max(x, PANEL_MARGIN), maxX)),
+      y: Math.round(Math.min(Math.max(y, PANEL_MARGIN), maxY)),
+      w,
+      h,
+    };
+  }
+
+  const SITE_DEFS = [
+    { id: 'luogu', name: '洛谷', host: /(^|\.)luogu\.com\.cn$/, selectors: ['.main-container article', '.main-container .problem-content', '.main-container'], titles: ['h2.title', 'h1', '.main-container h1'] },
+    { id: 'codeforces', name: 'Codeforces', host: /(^|\.)codeforces\.(com|ru)$/, selectors: ['.problem-statement'], titles: ['.problem-statement .header .title', '.problem-statement .title'] },
+    { id: 'atcoder', name: 'AtCoder', host: /(^|\.)atcoder\.jp$/, selectors: ['#task-statement .lang-en', '#task-statement .lang-ja', '#task-statement'], titles: ['h2', '.h2'] },
+    { id: 'loj', name: 'LibreOJ', host: /(^|\.)(loj\.ac|libreoj\.com)$/, selectors: ['.problem-content', '[class*="_problemContent_"]', 'article', 'main'], titles: ['.ui.header > span', '.ui.header', 'h1'] },
+    { id: 'nowcoder', name: '牛客', host: /(^|\.)nowcoder\.com$/, selectors: ['.question-intr', '.subject-describe', '.question-oi-bd', 'main'], titles: ['.terminal-topic-title', 'h1'] },
+    { id: 'hdu', name: 'HDU', host: /(^|\.)hdu\.edu\.cn$/, selectors: ['.problem-detail', '[class*="problem-detail"]', '#contest_nav + div', 'main'], titles: ['h1', '.problem-sidebar h3', 'h3'] },
+    { id: 'poj', name: 'POJ', host: /(^|\.)poj\.org$/, selectors: [], titles: ['.ptt', 'h1'] },
+    { id: 'qoj', name: 'QOJ', host: /(^|\.)qoj\.ac$/, selectors: ['.problem-statement', '.problem-content', 'article', 'main'], titles: ['h1', '.page-header'] },
+    { id: 'uoj', name: 'UOJ', host: /(^|\.)uoj\.ac$/, selectors: ['.uoj-content', '.problem-content', 'article', 'main'], titles: ['.page-header h1', '.page-header', 'h1'] },
+    { id: 'spoj', name: 'SPOJ', host: /(^|\.)spoj\.com$/, selectors: ['#problem-body'], titles: ['#problem-name', 'h1'] },
+    { id: 'codechef', name: 'CodeChef', host: /(^|\.)codechef\.com$/, selectors: ['[class*="problemStatement"]', '[class*="problem-statement"]', 'main', 'article'], titles: ['h1'] },
+    { id: 'vjudge', name: 'VJudge', host: /(^|\.)vjudge\.net$/, selectors: ['#prob-viewer', '.problem-description', 'main'], titles: ['#prob-title', 'h1'] },
+  ];
+
+  function hostOf(loc) {
+    if (!loc) return '';
+    if (loc.hostname) return String(loc.hostname).toLowerCase();
+    try { return new URL(String(loc.href || loc)).hostname.toLowerCase(); } catch (e) { return ''; }
+  }
+  function pathOf(loc) {
+    if (!loc) return '';
+    if (loc.pathname) return String(loc.pathname);
+    try { return new URL(String(loc.href || loc)).pathname; } catch (e) { return ''; }
+  }
+  function detectSite(loc) {
+    const host = hostOf(loc);
+    return SITE_DEFS.find((d) => d.host.test(host)) || null;
+  }
+
+  const siteLine = (v) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  function firstSiteText(doc, selectors) {
+    for (const sel of selectors || []) {
+      try {
+        const el = doc.querySelector(sel);
+        const t = el && siteLine(el.textContent);
+        if (t) return t;
+      } catch (e) { /* invalid/unsupported selector on an old page */ }
+    }
+    return '';
+  }
+  function searchParamOf(loc, key) {
+    try {
+      const q = loc && loc.search ? String(loc.search) : new URL(String(loc.href || loc)).search;
+      return new URLSearchParams(q).get(key) || '';
+    } catch (e) { return ''; }
+  }
+  function siteMeta(doc, loc, site) {
+    const def = site || detectSite(loc);
+    const path = pathOf(loc);
+    const seg = (re) => { const m = re.exec(path); return m ? decodeURIComponent(m[1] || '') : ''; };
+    let pid = '';
+    if (def) {
+      if (def.id === 'luogu') pid = seg(/\/problem\/([^/?#]+)/);
+      else if (def.id === 'codeforces') {
+        const a = /\/(?:contest|gym|problemset\/problem)\/(\d+)\/problem\/([^/?#]+)/.exec(path) || /\/problem\/(\d+)\/([^/?#]+)/.exec(path);
+        pid = a ? `${a[1]}${decodeURIComponent(a[2])}` : seg(/\/([^/?#]+)\/?$/);
+      } else if (def.id === 'atcoder') pid = seg(/\/tasks\/([^/?#]+)/);
+      else if (def.id === 'loj') pid = seg(/\/p\/([^/?#]+)/);
+      else if (def.id === 'nowcoder') pid = seg(/\/(?:problem|contest\/\d+)\/([^/?#]+)/) || seg(/\/([^/?#]+)\/?$/);
+      else if (def.id === 'hdu') pid = searchParamOf(loc, 'pid') || seg(/\/problem\/([^/?#]+)/) || seg(/\/([^/?#]+)\/?$/);
+      else if (def.id === 'poj') pid = searchParamOf(loc, 'id');
+      else if (def.id === 'qoj') pid = seg(/\/problem\/([^/?#]+)/) || seg(/\/([^/?#]+)\/?$/);
+      else if (def.id === 'uoj') pid = seg(/\/problem\/([^/?#]+)/);
+      else if (def.id === 'spoj') pid = seg(/\/problems\/([^/?#]+)/);
+      else if (def.id === 'codechef') pid = seg(/\/(?:problems|submit)\/([^/?#]+)/);
+      else if (def.id === 'vjudge') pid = seg(/\/problem\/([^/?#]+)/);
+    }
+    let title = firstSiteText(doc, def && def.titles);
+    if (!title) {
+      title = siteLine(doc.title || '')
+        .replace(/\s*[-|｜–—]\s*(洛谷|Codeforces|AtCoder|LibreOJ|LOJ|牛客网?|HDU|POJ|QOJ|UOJ|SPOJ|CodeChef|VJudge).*$/i, '')
+        .trim();
+    }
+    if (pid && title.toLowerCase().startsWith(pid.toLowerCase())) title = title.slice(pid.length).replace(/^[\s.:：、-]+/, '').trim() || title;
+    return { pid, title: title || pid || '题目', url: String((loc && loc.href) || '').split('#')[0] };
+  }
+
+  function cleanedStatementClone(root) {
+    const clone = root.cloneNode(true);
+    const kill = new Set(['nav', 'header', 'footer', 'aside', 'form', 'button', 'select', 'input', 'textarea', 'svg', 'canvas', 'iframe', 'object', 'embed', 'video', 'audio', 'style', 'noscript']);
+    const badClass = /(sidebar|side-bar|navbar|navigation|breadcrumb|pagination|(^|\s)menu(\s|$)|toolbar|submit|editor|codemirror|ace_editor|problem-tags|solutions?|comments?|discuss|recommend|advert|MathJax_Preview|mjx-preview)/i;
+    Array.from(clone.querySelectorAll ? clone.querySelectorAll('*') : []).reverse().forEach((el) => {
+      const tag = el.localName || '';
+      if (tag === 'script') {
+        if (!/^math\/tex/i.test(el.getAttribute && el.getAttribute('type') || '')) el.remove();
+        return;
+      }
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (kill.has(tag) || badClass.test(cls)) el.remove();
+    });
+    return clone;
+  }
+  function markdownFromRoot(root) {
+    if (!root) return '';
+    let md = '';
+    try { md = extract(cleanedStatementClone(root)).markdown || ''; } catch (e) { return ''; }
+    // Codeforces writes inline formulae as $$$...$$$ in the un-typeset statement.
+    md = md.replace(/\${3}([\s\S]*?)\${3}/g, (_, tex) => `$${String(tex).trim()}$`);
+    return tidy(md);
+  }
+
+  function luoguDataMarkdown(doc) {
+    let holder = null;
+    try { holder = doc.querySelector('#lentille-context'); } catch (e) { /* fall through */ }
+    if (!holder) return '';
+    const raw = String(holder.textContent || '').trim();
+    let data = null;
+    for (const text of [raw, (() => { try { return decodeURIComponent(raw); } catch (e) { return ''; } })()]) {
+      if (!text) continue;
+      try { data = JSON.parse(text); break; } catch (e) { /* try next representation */ }
+    }
+    if (!data) return '';
+    let best = null;
+    const fields = ['description', 'problemDescription', 'content'];
+    const visit = (v, depth) => {
+      if (!v || typeof v !== 'object' || depth > 9) return;
+      const desc = fields.map((k) => v[k]).find((x) => typeof x === 'string' && x.trim().length >= 80);
+      if (desc && (!best || desc.length > best.desc.length)) best = { obj: v, desc };
+      for (const k of Object.keys(v)) visit(v[k], depth + 1);
+    };
+    visit(data, 0);
+    if (!best) return '';
+    const o = best.obj;
+    const pick = (...keys) => {
+      for (const k of keys) if (typeof o[k] === 'string' && o[k].trim()) return o[k].trim();
+      return '';
+    };
+    const parts = [best.desc.trim()];
+    const input = pick('formatI', 'inputFormat', 'inputDescription', 'inputSpec');
+    const output = pick('formatO', 'outputFormat', 'outputDescription', 'outputSpec');
+    const hint = pick('hint', 'note', 'explanation');
+    if (input) parts.push(`## 输入格式\n\n${input}`);
+    if (output) parts.push(`## 输出格式\n\n${output}`);
+    if (Array.isArray(o.samples)) {
+      o.samples.forEach((sm, i) => {
+        const inp = Array.isArray(sm) ? sm[0] : (sm && (sm.input || sm.in));
+        const out = Array.isArray(sm) ? sm[1] : (sm && (sm.output || sm.out));
+        if (inp != null) parts.push(`## 样例输入 ${i + 1}\n\n\`\`\`\n${inp}\n\`\`\``);
+        if (out != null) parts.push(`## 样例输出 ${i + 1}\n\n\`\`\`\n${out}\n\`\`\``);
+      });
+    }
+    if (hint) parts.push(`## 说明/提示\n\n${hint}`);
+    return tidy(parts.join('\n\n'));
+  }
+
+  function bestGenericRoot(doc) {
+    if (!doc || !doc.querySelectorAll) return null;
+    const keys = ['problem', 'statement', 'input', 'output', 'sample', 'constraints', '题目描述', '输入格式', '输出格式', '样例', '数据范围'];
+    let best = null;
+    for (const el of Array.from(doc.querySelectorAll('article, main, section, div, td'))) {
+      const text = siteLine(el.textContent);
+      if (text.length < 200) continue;
+      let linkLen = 0;
+      try { for (const a of Array.from(el.querySelectorAll('a'))) linkLen += siteLine(a.textContent).length; } catch (e) { /* detached/legacy DOM */ }
+      const ratio = text.length ? linkLen / text.length : 1;
+      if (ratio > 0.45) continue;
+      const lower = text.toLowerCase();
+      const bonus = keys.reduce((n, k) => n + (lower.includes(k.toLowerCase()) ? 140 : 0), 0);
+      const score = text.length * (1 - ratio) + bonus - Math.max(0, text.length - 24000) * 0.02;
+      if (!best || score > best.score) best = { el, score };
+    }
+    return best && best.el;
+  }
+
+  /** Extract statement Markdown from a non-GOJ problem page; null when nothing plausible is found. */
+  function siteStatement(doc, loc) {
+    const site = detectSite(loc);
+    if (!site || !doc) return null;
+    const meta = siteMeta(doc, loc, site);
+    const enough = (md) => String(md || '').replace(/\s+/g, '').length >= 80;
+    if (site.id === 'luogu') {
+      const md = luoguDataMarkdown(doc);
+      if (enough(md)) return { site, meta, markdown: md, source: '#lentille-context 数据' };
+    }
+    if (site.id === 'hdu') {
+      let panels = [];
+      try { panels = Array.from(doc.querySelectorAll('.panel_content')); } catch (e) { panels = []; }
+      if (panels.length) {
+        const md = tidy(panels.map(markdownFromRoot).filter(Boolean).join('\n\n'));
+        if (enough(md)) return { site, meta, markdown: md, source: `.panel_content ×${panels.length}` };
+      }
+    }
+    if (site.id === 'poj') {
+      let pst = null;
+      try { pst = doc.querySelector('p.pst'); } catch (e) { pst = null; }
+      const root = pst && ((pst.closest && pst.closest('td')) || pst.parentElement);
+      const md = markdownFromRoot(root);
+      if (enough(md)) return { site, meta, markdown: md, source: 'p.pst 所在单元格' };
+    }
+    for (const sel of site.selectors || []) {
+      let el = null;
+      try { el = doc.querySelector(sel); } catch (e) { el = null; }
+      const md = markdownFromRoot(el);
+      if (enough(md)) return { site, meta, markdown: md, source: sel };
+    }
+    const root = bestGenericRoot(doc);
+    const md = markdownFromRoot(root);
+    return enough(md) ? { site, meta, markdown: md, source: '正文启发式' } : null;
+  }
 
   /* ====================================================================== *
    * 1b. 题单（训练）页：收集题目链接 / 把各题的 Markdown 合并成一份
@@ -3278,16 +3556,87 @@
    * 本题的简要题面单独拼成 Markdown：t0 是去掉故事背景、译成英文但信息齐全的题面，
    * t1 是一段更抽象的题意。没有就返回 ''。
    */
-  function briefMarkdown(rewrites, meta, zh) {
+  function briefMarkdown(rewrites, meta, opts) {
     const rw = normalizeRewrites(rewrites);
     if (!rw) return '';
+    const o = opts && typeof opts === 'object' ? opts : { translated: !!opts };
+    const source = o.source === 'api' ? 'api' : 'yuantiji';
+    const lang = source === 'api' ? (o.lang === 'en' ? 'en' : 'zh') : (o.translated ? 'zh' : 'en');
     const parts = [`## 简要题面${metaWho(meta)}`];
     if (rw.t0) parts.push(rw.t0);
     if (rw.t1) parts.push(`**更简版题意：** ${rw.t1}`);
-    parts.push(zh
-      ? '> 由原题机 yuantiji.ac 的模型重写（英文）后经 Google 翻译译成中文；机翻难免有误，细节仍以原题面为准。'
-      : '> 由原题机 yuantiji.ac 的模型重写：去掉故事背景、译成英文，保留解题所需信息；细节仍以原题面为准。');
+    if (source === 'api') {
+      const model = String(o.model || '').trim();
+      parts.push(o.translated
+        ? `> 由你配置的模型${model ? `（${model}）` : ''}重写（英文）后经 Google 翻译译成中文；机翻难免有误，细节仍以原题面为准。`
+        : (lang === 'zh'
+          ? `> 由你配置的模型${model ? `（${model}）` : ''}直接重写成中文：去掉故事背景，保留解题所需信息；模型可能有误，细节仍以原题面为准。`
+          : `> 由你配置的模型${model ? `（${model}）` : ''}直接重写成英文：去掉故事背景，保留解题所需信息；模型可能有误，细节仍以原题面为准。`));
+    } else {
+      parts.push(o.translated
+        ? '> 由原题机 yuantiji.ac 的模型重写（英文）后经 Google 翻译译成中文；机翻难免有误，细节仍以原题面为准。'
+        : '> 由原题机 yuantiji.ac 的模型重写：去掉故事背景、译成英文，保留解题所需信息；细节仍以原题面为准。');
+    }
     return `${parts.join('\n\n')}\n`;
+  }
+
+  const BRIEF_API_MAX = 14000;
+  function briefPrompt(statement, meta, lang) {
+    const useZh = lang !== 'en';
+    let text = String(statement || '').trim();
+    if (text.length > BRIEF_API_MAX) {
+      const head = Math.floor(BRIEF_API_MAX * 0.68);
+      text = `${text.slice(0, head)}\n\n[题面过长，中间略去一部分]\n\n${text.slice(-(BRIEF_API_MAX - head))}`;
+    }
+    const who = [meta && meta.pid, meta && meta.title].filter(Boolean).join(' ').trim();
+    return [
+      '你是一名编程竞赛题面编辑。请把下面的题目改写成简要题面，不要给解法、提示或代码。',
+      useZh ? '必须全部用中文输出（变量名、公式和专有名词除外）。' : 'Write the entire answer in English (except variables, formulas and proper names).',
+      '保留全部对象定义、操作、目标、输入输出格式、数据范围、特殊条件和公式；公式继续使用 $...$ 或 $$...$$。删掉故事背景和无关修辞，不要臆测原文没有的信息。样例只在理解题意必需时保留，不要大段抄样例数据。',
+      '输出格式必须严格如下，不要加前言、结尾或代码围栏：',
+      '### 简要题面',
+      useZh ? '（第一部分：信息完整的简要题面）' : '(Part 1: the complete concise statement)',
+      '### 更简版题意',
+      useZh ? '（第二部分：用一段更短的话概括核心任务）' : '(Part 2: one shorter paragraph capturing the core task)',
+      who ? `\n题目：${who}` : '',
+      '\n原题面：\n',
+      text,
+    ].filter(Boolean).join('\n');
+  }
+
+  function parseBriefReply(text) {
+    let raw = String(text || '').trim();
+    raw = raw.replace(/^```(?:json|markdown|md|text)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    if (raw.startsWith('{')) {
+      try {
+        const obj = JSON.parse(raw);
+        const jsonRw = normalizeRewrites({ t0: obj.t0 || obj.brief || obj.statement || obj.summary, t1: obj.t1 || obj.short || obj.core });
+        if (jsonRw) return jsonRw;
+      } catch (e) { /* not JSON after all */ }
+    }
+    const marker = /(^|\n)\s{0,3}(?:#{1,6}\s*)?(?:更简版题意|核心题意|一句话题意|t1|short version|more concise version)\s*[:：]?\s*/i.exec(raw);
+    let t0 = raw;
+    let t1 = '';
+    if (marker) {
+      t0 = raw.slice(0, marker.index).trim();
+      t1 = raw.slice(marker.index + marker[0].length).trim();
+    }
+    t0 = t0.replace(/^\s*(?:#{1,6}\s*)?(?:简要题面|t0|concise statement)\s*[:：]?\s*/i, '').trim();
+    t1 = t1.replace(/^\s*(?:#{1,6}\s*)?(?:更简版题意|核心题意|t1)\s*[:：]?\s*/i, '').trim();
+    return normalizeRewrites({ t0, t1 });
+  }
+
+  async function generateBrief(cfg, statement, meta, deps) {
+    const bad = configProblems(cfg);
+    if (bad.length) {
+      throw new UserError('NO_CONFIG', `简要题面已设置为“用自己配置的 API”，但当前接口还没配好：${bad.join('、')}。请在设置里填好，或把“简要题面来源”切回原题机 yuantiji.ac。`);
+    }
+    const lang = cfg && cfg.briefLang === 'en' ? 'en' : 'zh';
+    const reply = await chat(cfg, [{ type: 'text', text: briefPrompt(statement, meta, lang) }], deps);
+    const rewrites = parseBriefReply(reply && reply.text);
+    if (!rewrites) throw new UserError('BRIEF_EMPTY', '模型返回了空的简要题面；换一个模型或稍后再试一次。');
+    const side = apiOrder(cfg).find((x) => cfg && x.label === cfg.__side) || activeApi(cfg);
+    return { rewrites, lang, model: (side && side.model) || '' };
   }
 
   /** 搜原题的结果拼成 Markdown（面板里“复制结果”用的；简要题面排在最前面单独成节，不会自动混进题面里去）。 */
@@ -3495,6 +3844,15 @@
    * ====================================================================== */
   const KATEX_CSS = 'https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.css';
 
+  /**
+   * KaTeX 官方 CSS 经 @resource 取回后要内联进 Shadow DOM；其中的字体是相对路径
+   * （url(fonts/…)），直接内联会按当前 OJ 页面的地址解析而 404，所以先改成 CDN 绝对路径。
+   */
+  function katexCssForInline(css) {
+    const base = KATEX_CSS.replace(/katex\.min\.css(?:[?#].*)?$/, '');
+    return String(css || '').replace(/url\((['"]?)fonts\//g, `url($1${base}fonts/`);
+  }
+
   function getKatex() {
     const k = typeof katex !== 'undefined' ? katex : (typeof window !== 'undefined' ? window.katex : null);
     return k && typeof k.renderToString === 'function' ? k : null;
@@ -3559,7 +3917,10 @@
       return true;
     });
     const formula = (tex, display) => {
-      try { return kx.renderToString(tex, { displayMode: display, throwOnError: false, trust: false, strict: 'ignore' }); }
+      // output:'html' 是关键：KaTeX 默认同时输出 MathML 无障碍层与 HTML 视觉层；官方 CSS
+      // 一旦没加载到（例如被站点 CSP 拦下），MathML 不会被隐藏，公式就会显示两遍
+      // （$n$ 变 nn、$1\le n\le10^{18}$ 整串重复）。预览只输出视觉层，原文仍可切回看。
+      try { return kx.renderToString(tex, { displayMode: display, throwOnError: false, trust: false, strict: 'ignore', output: 'html' }); }
       catch (e) { return md.utils.escapeHtml(tex); }
     };
     md.renderer.rules.math_inline = (tokens, idx) => formula(tokens[idx].content, tokens[idx].meta.display);
@@ -3883,6 +4244,8 @@
   const loadConfig = (storage) => {
     const c = Object.assign({}, DEFAULT_CFG, storage.get(CFG_KEY, {}) || {});
     c.alt = Object.assign({}, EMPTY_API, c.alt || {});      // 备用接口：老配置里没有就补成空壳
+    c.briefSource = c.briefSource === 'api' ? 'api' : 'yuantiji';
+    c.briefLang = c.briefLang === 'en' ? 'en' : 'zh';
     return c;
   };
 
@@ -4357,39 +4720,60 @@
     }
 
     /**
+     * 取本题题面：GOJ/Hydro 继续走原来的页面数据/PDF 文字层链路；其它 OJ 只从当前
+     * 已打开的题目页读取题面。非 GOJ 时不写入 last、不填结果文本框，也不复制整份题面。
+     */
+    async function obtainStatement() {
+      const site = detectSite(loc);
+      if (site) {
+        const got = siteStatement(doc, loc);
+        if (!got) {
+          throw new UserError('NO_STATEMENT', `没能从这个 ${site.name} 页面里取到题面文字（页面可能还没加载完，或这个 OJ 改了版式）；等题面完全显示后再点一次“📝 简要题面”。`);
+        }
+        ui.log(`已从 ${site.name} 当前页面读取题面 ${got.markdown.replace(/\s+/g, '').length} 字（命中 ${got.source}）；只用来生成简要题面，不会显示或复制整份原题。`);
+        return { md: got.markdown, meta: got.meta, site };
+      }
+
+      let md = last;
+      let meta = session ? session.meta : null;
+      if (!md) {
+        const prep = prepare(doc, loc);
+        meta = prep.meta;
+        if (prep.pdfs.length) {
+          ui.log('先把题面从 PDF 里取出来（只读文字层，不调用视觉模型，也不会动剪贴板）……');
+          const c = { cfg: loadConfig(storage), meta: prep.meta, force: false, auto: true, engine: 'text', statementText: prep.markdown };
+          running = true;                       // readAll 会借主按钮显示进度，借用一下“忙”的标记，完事恢复
+          let results;
+          try { results = await readAll(prep.pdfs, c, false); } finally { running = false; }
+          pickAll(results, c);
+          md = assemble(prep.meta, prep.markdown, prep.pdfs, results);
+          last = md;
+          ui.result(md);
+          ui.state('idle', '📋 题面转 Markdown', '识别题面里的 PDF 并复制 Markdown');
+        } else {
+          md = assemble(prep.meta, prep.markdown, [], []);
+        }
+      }
+      if (!meta) { try { meta = extractMeta(doc, loc); } catch (e) { meta = null; } }
+      return { md, meta, site: null };
+    }
+
+    /**
      * 搜原题：把本题题面发给原题机 yuantiji.ac（自动 Expert：重写题面 + 跳过过短题面 + 重排），
-     * 在面板里列出最像的前 3 道（相似度 + 原题链接 + VJudge 链接），并把原题机给本题重写的
-     * 简要题面单独显示在结果区最上方（“📝 简要题面”走的也是这里）。全程不改剪贴板、不影响题面转写的状态。
-     * 题面还没转写过、而正文在 PDF 里时，先只读文字层把题面取出来（不调用视觉模型）。
+     * 在 GOJ 面板里列出最像的前 3 道。其它 OJ 按产品约定只显示简要题面，不列搜索结果，
+     * 因而这里若被调到会直接转到 brief()。
      */
     async function searchOriginal() {
+      if (detectSite(loc)) return brief();
       if (finding) return { skipped: 'busy' };
       if (running) { ui.log('正在转写题面，等它完了再点“🔎 搜原题”'); return { skipped: 'busy' }; }
       finding = true;
       const found = (x) => { if (ui.found) ui.found(x); };
       try {
-        found({ busy: true });
-        let md = last;
-        let meta = session ? session.meta : null;
-        if (!md) {
-          const prep = prepare(doc, loc);
-          meta = prep.meta;
-          if (prep.pdfs.length) {
-            ui.log('搜原题：先把题面从 PDF 里取出来（只读文字层，不调用视觉模型，也不会动剪贴板）……');
-            const c = { cfg: loadConfig(storage), meta: prep.meta, force: false, auto: true, engine: 'text', statementText: prep.markdown };
-            running = true;                       // readAll 会借主按钮显示进度，借用一下“忙”的标记，完事恢复
-            let results;
-            try { results = await readAll(prep.pdfs, c, false); } finally { running = false; }
-            pickAll(results, c);
-            md = assemble(prep.meta, prep.markdown, prep.pdfs, results);
-            last = md;
-            ui.result(md);
-            ui.state('idle', '📋 题面转 Markdown', '识别题面里的 PDF 并复制 Markdown');
-          } else {
-            md = assemble(prep.meta, prep.markdown, [], []);
-          }
-        }
-        if (!meta) { try { meta = extractMeta(doc, loc); } catch (e) { meta = null; } }
+        found({ busy: true, mode: 'find', source: 'yuantiji', lang: 'en' });
+        const got = await obtainStatement();
+        const md = got.md;
+        const meta = got.meta;
         const query = buildSearchQuery(md, meta);
         if (query.replace(/\s+/g, '').length < YUANTIJI_MIN_QUERY) {
           throw new UserError('FIND_EMPTY', '没取到足够长的题面文字，搜不了原题：先点“题面转 Markdown”确认能读出文字（扫描件 PDF 要配好视觉模型再转），然后再点 🔎 搜原题');
@@ -4406,7 +4790,7 @@
         if (!r.reranked) ui.log('提示：原题机这次没有启用重排（rerank），结果是按语义相似度 cos 排的');
         if (!r.rows.length) {
           ui.log('搜原题：没找到相似的题（新题，或者题面被“跳过过短题面”滤掉了；可以打开 yuantiji.ac 手动粘题面再试）');
-          found({ rows: [], secs, meta, rewrites: r.rewrites, briefMd: briefMarkdown(r.rewrites, meta) });
+          found({ rows: [], secs, meta, rewrites: r.rewrites, briefMd: briefMarkdown(r.rewrites, meta, { source: 'yuantiji', lang: 'en' }), mode: 'find', source: 'yuantiji', lang: 'en' });
           return { rows: [], secs };
         }
         r.rows.forEach((row, i) => {
@@ -4416,12 +4800,77 @@
         });
         ui.log(`搜原题完成（约 ${secs} 秒）：点上面结果区里的链接去原站 / VJudge 核对——相似度高也不等于就是同一道题`);
         if (r.rewrites) ui.log('本题的简要题面（原题机重写的英文版）单独显示在结果区最上方，可以单独复制');
-        const payload = { rows: r.rows, secs, meta, rewrites: r.rewrites, reranked: r.reranked, md: findResultsMarkdown(r.rows, meta, r.rewrites), briefMd: briefMarkdown(r.rewrites, meta) };
+        const payload = { rows: r.rows, secs, meta, rewrites: r.rewrites, reranked: r.reranked, md: findResultsMarkdown(r.rows, meta, r.rewrites), briefMd: briefMarkdown(r.rewrites, meta, { source: 'yuantiji', lang: 'en' }), mode: 'find', source: 'yuantiji', lang: 'en' };
         found(payload);
         return payload;
       } catch (e) {
         ui.log(`搜原题失败：${e.message}`);
-        found({ error: e.message });
+        found({ error: e.message, mode: 'find', source: 'yuantiji', lang: 'en' });
+        return { error: e.message, code: e.code };
+      } finally {
+        finding = false;
+      }
+    }
+
+    /** 只取简要题面：来源按设置选 yuantiji.ac 或用户自己配置的 OpenAI 兼容 API。 */
+    async function brief() {
+      if (finding) return { skipped: 'busy' };
+      if (running) { ui.log('正在转写题面，等它完了再点“📝 简要题面”'); return { skipped: 'busy' }; }
+      finding = true;
+      const cfg = loadConfig(storage);
+      const source = cfg.briefSource === 'api' ? 'api' : 'yuantiji';
+      const lang = source === 'api' ? cfg.briefLang : 'en';
+      const found = (x) => { if (ui.found) ui.found(x); };
+      try {
+        found({ busy: true, briefOnly: true, mode: 'brief', source, lang });
+        const got = await obtainStatement();
+        const statement = got.md;
+        const meta = got.meta;
+        const query = buildSearchQuery(statement, meta);
+        if (query.replace(/\s+/g, '').length < YUANTIJI_MIN_QUERY) {
+          throw new UserError('FIND_EMPTY', got.site
+            ? `从 ${got.site.name} 页面取到的题面太短，生成不了简要题面；等题面完全显示后再点一次。若一直这样，多半是这个 OJ 改了页面版式。`
+            : '没取到足够长的题面文字，生成不了简要题面：先点“题面转 Markdown”确认能读出文字，然后再点“📝 简要题面”。');
+        }
+
+        let payload;
+        if (source === 'api') {
+          const active = activeApi(cfg);
+          ui.log(`简要题面：把题面（${statement.length} 字）发给你配置的${active && active.label ? active.label : '模型接口'}${active && active.model ? `（${active.model}）` : ''}，请它直接写成${lang === 'en' ? '英文' : '中文'}简要题面……`);
+          const started = Date.now();
+          const r = await generateBrief(cfg, statement, meta, deps);
+          const secs = Math.round((Date.now() - started) / 100) / 10;
+          payload = {
+            rows: [], briefOnly: true, mode: 'brief', source: 'api', lang: r.lang, model: r.model, secs, meta,
+            rewrites: r.rewrites,
+            briefMd: briefMarkdown(r.rewrites, meta, { source: 'api', lang: r.lang, model: r.model }),
+          };
+          ui.log(`简要题面已生成（约 ${secs} 秒；来源：你配置的 API${r.model ? ` · ${r.model}` : ''}），单独显示在结果区，可以单独复制。`);
+        } else {
+          const wait = 3000 - (Date.now() - lastFindAt);
+          if (wait > 0) await deps.sleep(wait);
+          lastFindAt = Date.now();
+          ui.log(`简要题面：把题面（${query.length} 字）发给原题机 yuantiji.ac（Expert），只取它给本题重写的简要题面，不显示原题搜索结果……`);
+          const started = Date.now();
+          const r = await searchYuantiji(query, deps);
+          const secs = r.timing && r.timing.total != null && Number.isFinite(Number(r.timing.total))
+            ? Math.round(Number(r.timing.total) * 10) / 10
+            : Math.round((Date.now() - started) / 100) / 10;
+          if (!r.rewrites) {
+            throw new UserError('BRIEF_EMPTY', '原题机这次没返回简要题面（rewrites 为空）；稍后再试一次，或在设置里把“简要题面来源”切到自己配置的 API。');
+          }
+          payload = {
+            rows: [], briefOnly: true, mode: 'brief', source: 'yuantiji', lang: 'en', secs, meta,
+            rewrites: r.rewrites,
+            briefMd: briefMarkdown(r.rewrites, meta, { source: 'yuantiji', lang: 'en' }),
+          };
+          ui.log(`简要题面已取到（约 ${secs} 秒；来源：原题机 yuantiji.ac），单独显示在结果区，可以单独复制。`);
+        }
+        found(payload);
+        return payload;
+      } catch (e) {
+        ui.log(`简要题面失败：${e.message}`);
+        found({ error: e.message, briefOnly: true, mode: 'brief', source, lang });
         return { error: e.message, code: e.code };
       } finally {
         finding = false;
@@ -4438,7 +4887,7 @@
       }
     }
 
-    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, translateText, getLast: () => last, isBusy: () => running };
+    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, brief, translateText, getLast: () => last, isBusy: () => running };
   }
 
   /* ---------------------------------------------------------------------- *
@@ -4447,7 +4896,7 @@
   const api = {
     VERSION, PROMPT, PRESETS, ROUTE_RE, LIST_ROUTE_RE, LIST_GAP_MS, AUTO_MAX_LIST, LIST_MAX_AI_PAGES, DEFAULT_CFG, ENGINES, CFG_KEY, CACHE_KEY, PROMPT_VERSION,
     MAX_PDF_BYTES, MAX_PDF_PAGES, MAX_AI_PAGES, AUTO_MAX_AI_PAGES, UserError,
-    findStatementRoot, extract, extractMeta, buildHeader, assemble, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
+    findStatementRoot, extract, extractMeta, buildHeader, assemble, clampPanelLayout, detectSite, siteMeta, siteStatement, collectProblemLinks, countMissingRows, assembleList, tidy, cleanModelOutput,
     plainTextOf, gramSet, overlapScore, pageHasTex, dupOfStatement, DUP_SKIP_SCORE, DUP_MIN_CHARS, rootHint,
     EMPTY_API, apiSide, sideReady, hasAlt, apiOrder, activeApi,
     pageData, statementFromPageData, pdfLinksFromMarkdown, unescapeJs,
@@ -4457,7 +4906,7 @@
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
-    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh, renderBriefHtml, KATEX_CSS,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, briefPrompt, parseBriefReply, generateBrief, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh, renderBriefHtml, KATEX_CSS, katexCssForInline,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }
@@ -4778,8 +5227,21 @@
     .main[data-state="done"] { background: #16a34a; }
     .main[data-state="warn"] { background: #ca8a04; }
     .main[data-state="error"], .main[data-state="needcfg"] { background: #dc2626; }
-    .card { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: min(620px, calc(100vw - 32px)); max-height: 72vh;
+    .card { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 16px);
+            min-width: min(340px, calc(100vw - 16px)); min-height: min(260px, calc(100vh - 16px));
             display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #fff; color: #111827; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+    .panelhead { cursor: move; touch-action: none; user-select: none; }
+    .panelhead button, .panelhead select { cursor: pointer; }
+    .resizegrip { position: absolute; right: 2px; bottom: 2px; width: 24px; height: 24px; padding: 0; border-radius: 0 0 10px 0; background: transparent; box-shadow: none; color: #9ca3af; cursor: nwse-resize; touch-action: none; font-size: 17px; line-height: 24px; }
+    .resizegrip:hover { color: #2563eb; filter: none; }
+    .card[data-mode="site"] { width: min(540px, calc(100vw - 32px)); }
+    .card[data-mode="site"] textarea,
+    .card[data-mode="site"] [data-act="copy"],
+    .card[data-mode="site"] [data-act="rerun"],
+    .card[data-mode="site"] [data-act="rerun-ai"],
+    .card[data-mode="site"] [data-act="find"],
+    .card[data-mode="site"] #pickRow { display: none; }
+    .card[data-mode="site"] .findbox { max-height: none; flex: 1; }
     .card[hidden], .modal[hidden] { display: none; }
     .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .row > button { flex: none; }
@@ -4822,6 +5284,8 @@
     .findbox .briefview p { margin: 0 0 8px; }
     .findbox .briefview .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 4px 0; }
     .findbox .briefview .katex { font-size: 1.05em; }
+    /* 双保险：万一以后又有 MathML 层混进来，本地样式也把它藏掉，避免公式重复显示。 */
+    .findbox .briefview .katex-mathml { position: absolute; clip-path: inset(50%); height: 1px; width: 1px; overflow: hidden; padding: 0; border: 0; }
     .findbox .briefview :not(pre) > code { background: #eef2ff; padding: 1px 4px; border-radius: 4px; }
     .findbox .briefview pre { background: #172236; color: #e8eefb; overflow: auto; padding: 10px; border-radius: 8px; line-height: 1.5; }
     .findbox .briefview blockquote { border-left: 3px solid #7c9ce2; margin: 6px 0; padding-left: 10px; color: #4b5563; }
@@ -4850,14 +5314,14 @@
       <button class="mini" data-act="settings" title="设置">⚙️</button>
     </div>
     <div class="card" id="panel" hidden>
-      <div class="row">
+      <div class="row panelhead" id="panelHead" title="拖动标题栏可以移动面板；拖右下角 ↘ 可以改宽高（都会记住）">
         <b class="grow" id="panelTitle">题面 Markdown</b>
         <button class="flat ghost" data-act="stop" id="stopBtn" title="当前这道题处理完就停；已处理的题照常合并复制" hidden>停止</button>
         <button class="flat ghost" data-act="rerun" id="rerunBtn" title="忽略缓存，按当前设置重新识别">重新识别</button>
         <button class="flat ghost" data-act="rerun-ai" title="把每一页渲染成图片交给视觉模型识别（需要先配置 API）">AI 重新识别</button>
         <button class="flat ghost" data-act="switch" id="switchBtn" title="主接口 / 备用接口来回切换（设置里两套都填好才会出现）" hidden>⇄ 备用</button>
         <button class="flat ghost" data-act="find" id="findBtn" title="把这道题的题面发给原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），列出最像的 3 道及原题 / VJudge 链接">🔎 搜原题</button>
-        <button class="flat ghost" data-act="brief" id="briefBtn" title="从原题机 yuantiji.ac 取这道题的简要题面：模型去掉故事背景、译成英文后的题面（外加一段更简的题意），单独显示在结果区最上方；已经搜过原题就直接定位过去，没搜过会顺带搜一次">📝 简要题面</button>
+        <button class="flat ghost" data-act="brief" id="briefBtn" title="按设置里的来源获取本题简要题面：可选原题机 yuantiji.ac（英文，可再机翻），或用自己配置的 API 直接生成中文/英文；只显示简要题面，不列原题搜索结果">📝 简要题面</button>
         <button class="flat" data-act="copy">复制</button>
         <button class="flat ghost" data-act="close">关闭</button>
       </div>
@@ -4868,6 +5332,7 @@
       <div class="log" id="log"></div>
       <div class="findbox" id="findBox" hidden></div>
       <textarea id="out" spellcheck="false"></textarea>
+      <button class="resizegrip" id="resizeGrip" type="button" title="拖动改变面板宽高（会记住）" aria-label="拖动改变面板宽高">↘</button>
     </div>
     <div class="modal" id="modal" hidden>
       <div class="form">
@@ -4907,6 +5372,19 @@
         <label class="check"><input type="checkbox" id="listeach"> 逐题写入剪贴板 <small>（每转换完一道题先复制一次，最后再复制整份；给剪贴板历史工具用）</small></label>
         <b style="font-size:13px">搜原题 <small>原题机 yuantiji.ac（第三方的免费公益站，不是官方接口；库里约 25 万道题）</small></b>
         <label class="check"><input type="checkbox" id="findauto"> 转写完成后自动搜原题 <small>（每次都会把这道题的题面文字发给 yuantiji.ac 并等十几秒；Expert = 重写题面 + 跳过过短题面 + 重排，取最像的 3 道。默认关闭——也可以随时在面板里点“🔎 搜原题”）</small></label>
+        <b style="font-size:13px">简要题面 <small>点“📝 简要题面”时才生成；其它 OJ 上也只显示简要题面，不显示整份原题</small></b>
+        <label>简要题面来源 <small>原题机免费但只给英文；用自配 API 会把题面发给上面选中的主/备用接口（不支持图片的纯文本模型也可以）</small>
+          <select id="briefsource">
+            <option value="yuantiji">原题机 yuantiji.ac（免费，英文，可再点机翻成中文）</option>
+            <option value="api">用自己配置的 API（复用上面的主/备用接口）</option>
+          </select>
+        </label>
+        <label>自配 API 的简要题面语言 <small>仅上一项选“用自己配置的 API”时生效；原题机固定英文</small>
+          <select id="brieflang">
+            <option value="zh">中文（默认）</option>
+            <option value="en">English</option>
+          </select>
+        </label>
         <div class="msg" id="msg"></div>
         <div class="row">
           <button class="flat ghost" data-act="test" title="测试当前选中的那套接口（勾了“当前使用备用接口”就测备用）">测试连接</button>
@@ -4940,14 +5418,80 @@
       engine: $('engine'), apiUrl: $('apiUrl'), apiKey: $('apiKey'), model: $('model'), extra: $('extra'), concurrency: $('concurrency'), auto: $('auto'), pick: $('pickon'), holeImg: $('holeimg'),
       altUrl: $('altUrl'), altKey: $('altKey'), altModel: $('altModel'), altExtra: $('altExtra'), useAlt: $('usealt'),
       listAuto: $('listauto'), listGap: $('listgap'), listEach: $('listeach'),
-      findAuto: $('findauto'),
+      findAuto: $('findauto'), briefSource: $('briefsource'), briefLang: $('brieflang'),
     };
     $('panel').dataset.mode = h.mode || 'problem';
     if (h.mode === 'list') {
       $('panelTitle').textContent = '题单 Markdown';
       $('rerunBtn').textContent = '重新复制';
       $('rerunBtn').title = '重新取回题单里的每道题并复制';
+    } else if (h.mode === 'site') {
+      $('panelTitle').textContent = `${h.siteName || '本题'} · 简要题面`;
+      main.textContent = '📝 简要题面';
+      main.title = '读取当前题目页并生成简要题面（点一下才生成；不会复制整份原题面）';
     }
+
+    // Panel position and size: drag by the title row, resize from the lower-right grip.
+    // With no saved layout the old right/bottom CSS placement remains untouched.
+    const panelEl = $('panel');
+    const panelHeadEl = $('panelHead');
+    const resizeGripEl = $('resizeGrip');
+    const panelViewport = () => ({
+      width: (typeof window !== 'undefined' && window.innerWidth) || document.documentElement.clientWidth || 1024,
+      height: (typeof window !== 'undefined' && window.innerHeight) || document.documentElement.clientHeight || 768,
+    });
+    function applyPanelLayout(layout) {
+      const r = clampPanelLayout(layout, panelViewport());
+      if (!r) return null;
+      panelEl.classList.add('moved');
+      panelEl.style.left = `${r.x}px`;
+      panelEl.style.top = `${r.y}px`;
+      panelEl.style.right = 'auto';
+      panelEl.style.bottom = 'auto';
+      panelEl.style.width = `${r.w}px`;
+      panelEl.style.height = `${r.h}px`;
+      panelEl.style.maxHeight = 'none';
+      return r;
+    }
+    function currentPanelLayout() {
+      const r = panelEl.getBoundingClientRect();
+      return clampPanelLayout({ x: r.left, y: r.top, w: r.width, h: r.height }, panelViewport());
+    }
+    function ensurePanelInView() {
+      if (!panelEl.hidden && panelEl.classList.contains('moved')) applyPanelLayout(currentPanelLayout());
+    }
+    try { applyPanelLayout(h.getPanelLayout && h.getPanelLayout()); } catch (e) { /* a bad saved rectangle falls back to the CSS default */ }
+    function beginPanelGesture(e, kind) {
+      if (e.button != null && e.button !== 0) return;
+      if (kind === 'move' && e.target.closest && e.target.closest('button,select,input,textarea,a')) return;
+      const rect = panelEl.getBoundingClientRect();
+      const base = { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+      if (!applyPanelLayout(base)) return;
+      const sx = e.clientX;
+      const sy = e.clientY;
+      const onMove = (ev) => {
+        const dx = ev.clientX - sx;
+        const dy = ev.clientY - sy;
+        applyPanelLayout(kind === 'move'
+          ? { ...base, x: base.x + dx, y: base.y + dy }
+          : { ...base, w: base.w + dx, h: base.h + dy });
+        ev.preventDefault();
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        window.removeEventListener('pointercancel', onUp, true);
+        const now = currentPanelLayout();
+        if (now && h.savePanelLayout) h.savePanelLayout(now);
+      };
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+      window.addEventListener('pointercancel', onUp, true);
+      e.preventDefault();
+    }
+    if (panelHeadEl) panelHeadEl.addEventListener('pointerdown', (e) => beginPanelGesture(e, 'move'));
+    if (resizeGripEl) resizeGripEl.addEventListener('pointerdown', (e) => { e.stopPropagation(); beginPanelGesture(e, 'resize'); });
+    if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', ensurePanelInView);
     fields.apiUrl.placeholder = 'https://.../v1/chat/completions';
     fields.apiKey.placeholder = 'sk-...';
     fields.model.placeholder = '例如 glm-4.6v-flash（必须是支持图片输入的模型）';
@@ -4967,14 +5511,37 @@
     let lastBriefZh = null;        // 最近一次简要题面的中文机翻（{t0,t1}；没翻过是 null）
     let lastBriefMeta = null;      // 那道题的 meta（切换中英文时重拼要复制的 Markdown 用）
     let katexCssDone = false;
-    /** 首次预览时把 KaTeX 官方样式插进面板（公式的字体与排版靠它；只插一次）。 */
+    /**
+     * 首次预览时把 KaTeX 官方样式插进面板（公式的字体与排版靠它；只插一次）。
+     * 优先用脚本头 @resource 取回的 CSS 文本直接内联进 Shadow DOM：外链 <link> 会受站点
+     * CSP 的 style-src 限制，GOJ 上就出现过 CSS 没进来、公式排版散架的情况；内联文本
+     * 是油猴管的资源，不走页面请求。取不到资源时再退回外链。
+     */
     function ensureKatexCss() {
       if (katexCssDone) return;
       katexCssDone = true;
-      const l = document.createElement('link');
-      l.rel = 'stylesheet';
-      l.href = KATEX_CSS;
-      root.appendChild(l);
+      const addLink = () => {
+        const l = document.createElement('link');
+        l.rel = 'stylesheet';
+        l.href = KATEX_CSS;
+        root.appendChild(l);
+      };
+      const addStyle = (css) => {
+        if (!css) return false;
+        const s = document.createElement('style');
+        s.textContent = katexCssForInline(css);
+        root.appendChild(s);
+        return true;
+      };
+      try {
+        const css = typeof GM_getResourceText === 'function' ? GM_getResourceText('katexCss') : '';
+        if (css && typeof css.then === 'function') {
+          css.then((text) => { if (!addStyle(text)) addLink(); }).catch(addLink);
+          return;
+        }
+        if (addStyle(css)) return;
+      } catch (e) { /* 资源不可用时退回外链 */ }
+      addLink();
     }
     const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `msg${kind ? ` ${kind}` : ''}`; };
     const readForm = () => ({
@@ -4991,6 +5558,8 @@
       listGap: Number.isNaN(parseInt(fields.listGap.value, 10)) ? LIST_GAP_MS : Math.max(0, Math.min(LIST_GAP_MAX, parseInt(fields.listGap.value, 10))),
       listEach: fields.listEach.checked,
       findAuto: fields.findAuto.checked,
+      briefSource: fields.briefSource.value === 'api' ? 'api' : 'yuantiji',
+      briefLang: fields.briefLang.value === 'en' ? 'en' : 'zh',
       alt: {
         apiUrl: fields.altUrl.value.trim(),
         apiKey: fields.altKey.value.trim(),
@@ -5008,7 +5577,7 @@
       if (ok) btn.textContent = c.useAlt ? '⇄ 切回主接口' : `⇄ 切到备用（${shorten(c.alt.model, 16)}）`;
       return ok;
     }
-    const openPanel = () => { $('panel').hidden = false; };
+    const openPanel = () => { $('panel').hidden = false; ensurePanelInView(); };
     const openSettings = () => {
       const c = h.getConfig();
       fields.engine.value = ENGINES.includes(c.engine) ? c.engine : 'auto';
@@ -5024,6 +5593,8 @@
       fields.listGap.value = listGapOf(c);
       fields.listEach.checked = !!c.listEach;
       fields.findAuto.checked = !!c.findAuto;
+      fields.briefSource.value = c.briefSource === 'api' ? 'api' : 'yuantiji';
+      fields.briefLang.value = c.briefLang === 'en' ? 'en' : 'zh';
       const alt = c.alt || EMPTY_API;
       fields.altUrl.value = alt.apiUrl || '';
       fields.altKey.value = alt.apiKey || '';
@@ -5093,7 +5664,7 @@
           const alt = cfg.alt || {};
           const altTouched = alt.apiUrl || alt.apiKey || alt.model || alt.extraBody;
           const touched = cfg.apiUrl || cfg.apiKey || cfg.model || cfg.extraBody || altTouched;
-          const bad = touched || cfg.engine === 'ai' ? configProblems(cfg) : [];
+          const bad = touched || cfg.engine === 'ai' || cfg.briefSource === 'api' ? configProblems(cfg) : [];
           // 备用接口只填了一半：多半是漏了，直接说清楚（全留空 = 不用备用接口）
           if (altTouched && !hasAlt(cfg)) bad.push('备用接口（地址 / API Key / 模型名要一起填，或者全留空）');
           if (bad.length) { setMsg(`还没填好：${bad.join('、')}`, 'err'); break; }
@@ -5117,7 +5688,8 @@
           try {
             h.switchApi();
             updateSwitch();
-            h.run({ force: true });          // 切完立刻用新接口重跑一遍，方便对比
+            if (h.mode === 'site') h.brief();
+            else h.run({ force: true });          // 切完立刻用新接口重跑一遍，方便对比
           } catch (err) { setMsg(err.message, 'err'); openSettings(); }
           break;
         }
@@ -5150,8 +5722,11 @@
         const btn = $('findBtn');
         btn.disabled = !!(data && data.busy);
         const bBtn = $('briefBtn');
-        if (bBtn) bBtn.disabled = !!(data && data.busy);
-        btn.textContent = data && data.busy ? '🔎 搜索中…' : '🔎 搜原题';
+        if (bBtn) {
+          bBtn.disabled = !!(data && data.busy);
+          bBtn.textContent = data && data.busy && (data.briefOnly || data.mode === 'brief') ? '📝 生成中…' : '📝 简要题面';
+        }
+        btn.textContent = data && data.busy && !(data.briefOnly || data.mode === 'brief') ? '🔎 搜索中…' : '🔎 搜原题';
         if (!data) { box.hidden = true; box.textContent = ''; lastFoundMd = ''; lastBriefMd = ''; lastBriefZh = null; lastBriefMeta = null; return; }
         box.hidden = false;
         box.textContent = '';
@@ -5164,15 +5739,27 @@
         const head = document.createElement('div');
         head.className = 'fh';
         const b = document.createElement('b');
-        b.textContent = data.busy ? '正在去原题机搜原题（Expert，约十几秒）…'
-          : (data.error ? '搜原题失败' : `原题机 · Expert · 最像的 ${data.rows.length} 道${data.secs != null ? `（约 ${data.secs} 秒）` : ''}`);
+        const briefOnly = !!(data.briefOnly || data.mode === 'brief');
+        const briefSource = data.source === 'api' ? 'api' : 'yuantiji';
+        const briefLang = briefSource === 'api' ? (data.lang === 'en' ? 'en' : 'zh') : 'en';
+        const briefModel = data.model || '';
+        const briefSourceLabel = briefSource === 'api' ? `自配 API${briefModel ? ` · ${briefModel}` : ''}` : '原题机 yuantiji.ac';
+        b.textContent = data.busy
+          ? (briefOnly
+            ? (briefSource === 'api' ? '正在用你配置的 API 生成简要题面…' : '正在从原题机获取简要题面（Expert，约十几秒）…')
+            : '正在去原题机搜原题（Expert，约十几秒）…')
+          : (data.error
+            ? (briefOnly ? '简要题面失败' : '搜原题失败')
+            : (briefOnly
+              ? `简要题面 · ${briefSourceLabel}${data.secs != null ? `（约 ${data.secs} 秒）` : ''}`
+              : `原题机 · Expert · 最像的 ${(data.rows || []).length} 道${data.secs != null ? `（约 ${data.secs} 秒）` : ''}`));
         head.appendChild(b);
-        if (data.rows && data.rows.length) {
+        if (!briefOnly && data.rows && data.rows.length) {
           const cp = document.createElement('button');
           cp.className = 'flat ghost'; cp.dataset.act = 'copyfind'; cp.textContent = '复制结果';
           head.appendChild(cp);
         }
-        head.appendChild(link('https://yuantiji.ac', 'yuantiji.ac'));
+        if (briefSource === 'yuantiji') head.appendChild(link('https://yuantiji.ac', 'yuantiji.ac'));
         box.appendChild(head);
         if (data.error || data.busy) {
           lastFoundMd = '';
@@ -5183,7 +5770,7 @@
           return;
         }
         lastFoundMd = data.md || '';
-        lastBriefMd = data.briefMd || briefMarkdown(data.rewrites, data.meta) || '';
+        lastBriefMd = data.briefMd || briefMarkdown(data.rewrites, data.meta, { source: briefSource, lang: briefLang, model: briefModel }) || '';
         lastBriefZh = null;
         lastBriefMeta = data.meta || null;
         const rwBrief = data.rewrites && (data.rewrites.t0 || data.rewrites.t1) ? data.rewrites : null;
@@ -5193,14 +5780,17 @@
           const bh = document.createElement('div');
           bh.className = 'bh';
           const bb = document.createElement('b');
-          bb.textContent = '本题简要题面（原题机重写 · 英文）';
+          const briefTitle = briefSource === 'api'
+            ? `本题简要题面（自配 API${briefModel ? ` · ${briefModel}` : ''} · ${briefLang === 'zh' ? '中文' : '英文'}）`
+            : '本题简要题面（原题机重写 · 英文）';
+          bb.textContent = briefTitle;
           bh.appendChild(bb);
           const tb = document.createElement('button');
           tb.className = 'flat ghost';
           tb.type = 'button';
           tb.textContent = '翻译成中文';
           tb.title = '用 Google 翻译把这段英文简要题面译成中文（会把这段文字发给 translate.googleapis.com；公式会先占位保护，不会被翻坏）';
-          bh.appendChild(tb);
+          if (briefLang !== 'zh') bh.appendChild(tb);
           const pvBtn = document.createElement('button');
           pvBtn.className = 'flat ghost';
           pvBtn.type = 'button';
@@ -5223,7 +5813,9 @@
           bz.appendChild(pv);
           const fn = document.createElement('div');
           fn.className = 'sub';
-          const fnEn = '原题机的模型去掉故事背景后重写的，细节仍以原题面为准。';
+          const fnEn = briefSource === 'api'
+            ? `由你配置的模型${briefModel ? `（${briefModel}）` : ''}去掉故事背景后直接重写的${briefLang === 'zh' ? '中文' : '英文'}简要题面；模型可能有误，细节仍以原题面为准。`
+            : '原题机的模型去掉故事背景后重写的，细节仍以原题面为准。';
           fn.textContent = fnEn;
           bz.appendChild(fn);
           box.appendChild(bz);
@@ -5248,10 +5840,16 @@
             const cur = useZh ? lastBriefZh : rwBrief;
             if (bp && cur.t0) bp.textContent = cur.t0;
             if (bs && cur.t1) bs.textContent = `更简版题意：${cur.t1}`;
-            bb.textContent = useZh ? '本题简要题面（中文机翻）' : '本题简要题面（原题机重写 · 英文）';
-            fn.textContent = useZh ? 'Google 翻译的中文（机翻）；原稿是原题机重写的英文版，细节仍以原题面为准。' : fnEn;
+            bb.textContent = useZh ? `本题简要题面（${briefSource === 'api' ? '自配 API · ' : ''}中文机翻）` : briefTitle;
+            fn.textContent = useZh
+              ? (briefSource === 'api'
+                ? 'Google 翻译的中文（机翻）；原稿是你配置的模型生成的英文版，细节仍以原题面为准。'
+                : 'Google 翻译的中文（机翻）；原稿是原题机重写的英文版，细节仍以原题面为准。')
+              : fnEn;
             tb.textContent = useZh ? '看英文原文' : (lastBriefZh ? '看中文翻译' : '翻译成中文');
-            lastBriefMd = briefMarkdown(cur, lastBriefMeta, useZh) || lastBriefMd;
+            lastBriefMd = briefMarkdown(cur, lastBriefMeta, useZh
+              ? { source: briefSource, lang: 'zh', model: briefModel, translated: true }
+              : { source: briefSource, lang: briefLang, model: briefModel }) || lastBriefMd;
             if (previewing) fillPreview();
           };
           tb.addEventListener('click', async () => {
@@ -5281,6 +5879,14 @@
             pvBtn.textContent = previewing ? '看原文' : '预览';
             if (previewing) { ensureKatexCss(); fillPreview(); }
           });
+        }
+        if (briefOnly) {
+          if (!rwBrief) {
+            const e = document.createElement('div');
+            e.className = 'sub'; e.textContent = '这次没有拿到简要题面。';
+            box.appendChild(e);
+          }
+          return;
         }
         if (!data.rows.length) {
           const e = document.createElement('div');
@@ -5409,14 +6015,16 @@
   }
 
   function boot() {
-    const isList = LIST_ROUTE_RE.test(location.pathname);        // 题单（训练）页：一次复制里面所有题目的题面
-    if (!isList && !ROUTE_RE.test(location.pathname)) return;
+    const site = detectSite(location);
+    const isSite = !!site;
+    const isList = !isSite && LIST_ROUTE_RE.test(location.pathname);        // 题单（训练）页：一次复制里面所有题目的题面
+    if (!isSite && !isList && !ROUTE_RE.test(location.pathname)) return;
     if (document.getElementById('goj2md-host')) return;          // 装了两份脚本时只启用先加载的那份
     log(`v${VERSION} 已加载：${location.pathname}`);
 
     const storage = { get: (k, d) => GM_getValue(k, d), set: (k, v) => GM_setValue(k, v) };
     try { if (storage.get(OLD_CACHE_KEY, null)) storage.set(OLD_CACHE_KEY, {}); } catch (e) { /* 旧版本的图片转写缓存，清掉即可 */ }
-    if (!getPdfjs()) log('警告：没有加载到 pdf.js（脚本头部的 @require 失败），识别 PDF 时会报错');
+    if (!isSite && !getPdfjs()) log('警告：没有加载到 pdf.js（脚本头部的 @require 失败），识别 PDF 时会报错');
     let ui = null;
     const uiBridge = {
       state: (...a) => ui && ui.state(...a),
@@ -5447,6 +6055,11 @@
         if (!(opts && opts.auto)) ui.openPanel();
         return;
       }
+      if (isSite) {
+        ui.openPanel();
+        runner.brief().catch((e) => log('获取简要题面失败：', e));
+        return;
+      }
       ui.clearLog();
       if (isList) ui.busy(true);
       try {
@@ -5470,7 +6083,10 @@
     }
 
     ui = createUI({
-      mode: isList ? 'list' : 'problem',
+      mode: isSite ? 'site' : (isList ? 'list' : 'problem'),
+      siteName: site && site.name,
+      getPanelLayout: () => storage.get(PANEL_KEY, null),
+      savePanelLayout: (layout) => storage.set(PANEL_KEY, layout),
       stop: () => { if (!runner.cancel()) ui.log('现在没有正在复制的题单'); },
       getConfig: () => loadConfig(storage),
       saveConfig: (cfg) => storage.set(CFG_KEY, cfg),
@@ -5488,30 +6104,37 @@
       test: (cfg, only) => runner.testConnection(cfg, only),
       switchApi: () => runner.switchApi(),
       find: () => { ui.openPanel(); runner.searchOriginal().catch((e) => log('搜原题失败：', e)); },
-      brief: () => { ui.openPanel(); if (ui.showBrief && ui.showBrief()) return; runner.searchOriginal().catch((e) => log('获取简要题面失败：', e)); },
+      brief: () => { ui.openPanel(); if (ui.showBrief && ui.showBrief()) return; runner.brief().catch((e) => log('获取简要题面失败：', e)); },
       translateText: (t) => runner.translateText(t),
       onSaved: () => {
+        if (isSite) return;                                          // 其它 OJ 只在用户点击时生成，改设置不自动发请求
         if (isList) {                                                // 题单页：间隔改了，按钮上的提示跟着变；不会因为改设置就重新跑一遍整个题单
           if (ui.stateName() === 'idle' && listCount()) ui.state('idle', listLabel(listCount()), listTip());
         } else if (['needcfg', 'error'].includes(ui.stateName())) trigger({});     // 配置好 / 改好 Key 之后立刻重试
       },
     });
-    if (isList) ui.state('idle', '📚 复制题单全部题面', '正在找题单里的题目……');
+    if (isSite) ui.state('idle', '📝 简要题面', `读取当前 ${site.name} 题目页并生成简要题面（点一下才生成）`);
+    else if (isList) ui.state('idle', '📚 复制题单全部题面', '正在找题单里的题目……');
     else ui.state('idle', '📋 题面转 Markdown', '识别题面里的 PDF 并复制 Markdown');
     ui.updateSwitch();
 
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('⚙️ 设置', () => ui.openSettings());
-      if (isList) {
+      if (isSite) {
+        GM_registerMenuCommand('📝 简要题面', () => { ui.openPanel(); if (!(ui.showBrief && ui.showBrief())) runner.brief(); });
+      } else if (isList) {
         GM_registerMenuCommand('📚 复制题单全部题面', () => trigger({}));
+        GM_registerMenuCommand('🧹 清除识别缓存', () => { storage.set(CACHE_KEY, {}); ui.log('已清除识别缓存'); });
       } else {
         GM_registerMenuCommand('📋 识别并复制本题', () => trigger({}));
         GM_registerMenuCommand('🔁 用视觉模型重新识别', () => trigger({ force: true, engine: 'ai' }));
         GM_registerMenuCommand('🔎 搜原题（原题机）', () => { ui.openPanel(); runner.searchOriginal(); });
-        GM_registerMenuCommand('📝 简要题面（原题机）', () => { ui.openPanel(); if (!(ui.showBrief && ui.showBrief())) runner.searchOriginal(); });
+        GM_registerMenuCommand('📝 简要题面', () => { ui.openPanel(); if (!(ui.showBrief && ui.showBrief())) runner.brief(); });
+        GM_registerMenuCommand('🧹 清除识别缓存', () => { storage.set(CACHE_KEY, {}); ui.log('已清除识别缓存'); });
       }
-      GM_registerMenuCommand('🧹 清除识别缓存', () => { storage.set(CACHE_KEY, {}); ui.log('已清除识别缓存'); });
     }
+
+    if (isSite) return;                                             // 其它 OJ 打开页面时不自动抓题面、不发请求，等用户点“📝 简要题面”
 
     if (isList) {
       // 等题单里的题目出现 → 再等页面“静止”（前端脚本处理完）→ 按设置自动开始。
