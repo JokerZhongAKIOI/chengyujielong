@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.15.0
-// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，可一键用 Google 翻译成中文，并可渲染成带公式排版的预览；题面与简要题面都可排版成 PDF 下载
+// @version      2.14.0
+// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，可一键用 Google 翻译成中文，并可渲染成带公式排版的预览
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
 // @match        *://www.goj.wiki/d/*/contest/*/p/*
@@ -21,7 +21,6 @@
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js#sha256=feabdf309770ed24bba31a5467836cdc8cf639c705af27d52b585b041bb8527b
 // @require      https://cdn.jsdelivr.net/npm/markdown-it@15.0.3/dist/browser/markdown-it.umd.min.js#sha256=391f2aa638e75e6c7859d0a5c5650ef0956722a45998f17e05b83bc655778e1e
 // @require      https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.js#sha256=103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7
-// @require      https://cdn.jsdelivr.net/npm/html2pdf.js@0.14.0/dist/html2pdf.bundle.min.js#sha256=9563c45f032179c73454293a649929e60fc24c05a326e8ab2811cfa8f25c3607
 // ==/UserScript==
 
 /*
@@ -40,8 +39,6 @@
  *      以及按 uid（Source/题号）拼出的 VJudge 链接。结果不会混进题面 Markdown，要复制用结果区的“复制结果”。
  *      同一次搜索还会带回原题机给本题重写的简要题面（英文），点“📝 简要题面”可单独查看 / 单独复制，
  *      简要题面区里还能一键用 Google 翻译成中文（点了才发）、一键渲染预览（Markdown + LaTeX 排版后读）。
- *   6. 下载 PDF：面板的“📄 下载 PDF”把文本框里的题面 Markdown（简要题面区也有自己的）按同一套
- *      markdown-it + KaTeX 排版，用 html2pdf 在隔离页里生成 A4 PDF 直接下载（图片型 PDF）。
  *
  * 本文件被 Node 测试以 require() 方式加载时只导出纯函数（见文件末尾），不会触碰 DOM / GM_*。
  */
@@ -51,7 +48,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.15.0';
+  const VERSION = '2.14.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -3572,7 +3569,7 @@
   }
 
   /**
-   * 简要题面纯文本 → 排版好的 HTML。供简要题面区的“预览”与生成 PDF 共用——
+   * 简要题面纯文本 → 排版好的 HTML。供简要题面区的“预览”用 innerHTML 显示——
    * 这是全脚本唯一把第三方文字变成 HTML 的地方：HTML 由 markdown-it（html:false）
    * 与 KaTeX（trust:false）生成，原文里的标签只会被转义。库没加载到返回 null。
    */
@@ -3580,69 +3577,6 @@
     const md = briefRenderer();
     if (!md) return null;
     return md.render(String(text || ''));
-  }
-
-  /* ====================================================================== *
-   * 4e. 生成 PDF 下载（html2pdf = html2canvas + jsPDF）
-   *
-   * 把 Markdown 先经 4d 的同一条渲染管线排版成 HTML，装进一张隔离的隐藏
-   * iframe 页（自己的样式 + KaTeX 官方 CSS，免得被站点页面样式干扰——
-   * html2canvas 会被页面里它不认识的 CSS 绊倒），等字体与图片就绪后用
-   * html2pdf 生成 A4 PDF 触发下载。生成的是图片型 PDF（每页是一张渲染图，
-   * 能看能打印、不能选字，要文本用 Markdown 本身）。库走脚本头 @require。
-   * ====================================================================== */
-  function getHtml2pdf() {
-    const h = typeof html2pdf !== 'undefined' ? html2pdf : (typeof window !== 'undefined' ? window.html2pdf : null);
-    return typeof h === 'function' ? h : null;
-  }
-
-  const pdfEscape = (t) => String(t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-
-  /** 给排版用的清洗：去掉 HTML 注释与没被替换掉的占位符行，正文/图片不动。 */
-  function cleanForPdf(md) {
-    return `${String(md || '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/^.*%%(?:PDF:\d+|H\d+-\d+)%%.*$/gm, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()}\n`;
-  }
-
-  /** 下载文件名：“P2085 葫芦娃救爷爷.pdf”（简要题面再加后缀），收掉非法字符。 */
-  function pdfFileName(meta, kind) {
-    let base = '';
-    if (meta) {
-      const title = String(meta.title || '');
-      const pid = String(meta.pid || '');
-      base = title && pid && title.startsWith(pid) ? title : [pid, title].filter(Boolean).join(' ');
-    }
-    if (kind === 'brief') base = base ? `${base} 简要题面` : '简要题面';
-    if (!base) base = '题面';
-    return `${base.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 80)}.pdf`;
-  }
-
-  /** 整页 HTML（照阅读器 .paper 的排版，另加分页时别把标题/代码块/表格从中截断）。 */
-  function buildPdfHtml(title, bodyHtml) {
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>${pdfEscape(title)}</title>
-<link rel="stylesheet" href="${KATEX_CSS}">
-<style>
-*{box-sizing:border-box}
-body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
-.paper{padding:4px 8px;font-size:15px;line-height:1.8;overflow-wrap:anywhere}
-.paper h1,.paper h2,.paper h3{line-height:1.4;margin:.9em 0 .5em}
-.paper h1{font-size:22px}.paper h2{font-size:19px}.paper h3{font-size:17px}
-.paper h1:first-child{margin-top:0}
-.paper p{margin:.55em 0}
-.paper img{max-width:100%}
-.paper pre{background:#172236;color:#e8eefb;overflow:auto;padding:12px 14px;border-radius:8px;line-height:1.5;font-size:13px;white-space:pre-wrap;word-break:break-all}
-.paper :not(pre)>code{background:#f0f3f8;padding:2px 5px;border-radius:4px}
-.paper blockquote{border-left:4px solid #7c9ce2;margin-left:0;padding-left:14px;color:#4b5563}
-.paper table{border-collapse:collapse;display:block;overflow:auto}
-.paper th,.paper td{border:1px solid #d6dce6;padding:6px 10px}
-.paper a{color:#2459b4;text-decoration:none}
-.katex-display{overflow-x:auto;overflow-y:hidden;padding:4px 0}
-.paper h1,.paper h2,.paper h3,.paper pre,.paper table,.paper img,.katex-display{page-break-inside:avoid}
-</style></head><body><main id="pdfroot" class="paper">${bodyHtml}</main></body></html>`;
   }
 
   /* ====================================================================== *
@@ -4504,59 +4438,7 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
       }
     }
 
-    /**
-     * 把一份 Markdown（本题题面 / 简要题面）排版成 PDF 下载。
-     * 隔离进隐藏 iframe 里排版截图（见 4e 节），失败把原因写进日志并返回 {error}。
-     */
-    async function downloadPdf(kind, mdText) {
-      const md = cleanForPdf(mdText);
-      if (!md.trim()) { ui.log(`生成 PDF：还没有${kind === 'brief' ? '简要题面' : '题面'}可下载（先识别/搜索一次）`); return { skipped: 'empty' }; }
-      const body = renderBriefHtml(md);
-      if (body == null) { ui.log('生成 PDF：排版组件（KaTeX / markdown-it）没加载到（CDN 可能连不上），稍后再试'); return { skipped: 'nolib' }; }
-      const lib = getHtml2pdf();
-      if (!lib) { ui.log('生成 PDF：PDF 组件（html2pdf）没加载到（CDN 可能连不上），稍后再试'); return { skipped: 'nolib' }; }
-      let meta = session ? session.meta : null;
-      if (!meta) { try { meta = extractMeta(doc, loc); } catch (e) { meta = null; } }
-      const filename = pdfFileName(meta, kind);
-      const docTitle = (meta && (meta.title || meta.pid)) || (kind === 'brief' ? '简要题面' : '题面');
-      if (md.length > 30000) ui.log('生成 PDF：内容比较长，可能要多等一会儿；太长时浏览器画布放不下会失败（日志会说明）');
-      ui.log(`正在生成 PDF（${filename}）：排版并渲染公式，稍等几秒……`);
-      const iframe = doc.createElement('iframe');
-      iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;';
-      doc.body.appendChild(iframe);
-      try {
-        const idoc = iframe.contentDocument;
-        if (!idoc) throw new Error('排版页没建起来（iframe 被页面拦截？）');
-        idoc.open();
-        idoc.write(buildPdfHtml(docTitle, body));
-        idoc.close();
-        for (let i = 0; i < 50 && !(idoc.readyState === 'complete' && idoc.getElementById('pdfroot')); i++) await deps.sleep(200);
-        if (!idoc.getElementById('pdfroot')) throw new Error('排版页没建起来（内容写不进去）');
-        try { if (idoc.fonts && idoc.fonts.ready) await Promise.race([idoc.fonts.ready, deps.sleep(4000)]); } catch (e) { /* 字体没就绪也继续，最多公式字形差一点 */ }
-        const pending = [...idoc.images].filter((im) => !im.complete);
-        if (pending.length) await Promise.race([Promise.all(pending.map((im) => new Promise((r) => { im.onload = r; im.onerror = r; }))), deps.sleep(6000)]);
-        iframe.style.height = `${Math.min((idoc.documentElement && idoc.documentElement.scrollHeight) || 1200, 15000) + 40}px`;
-        await deps.sleep(300);
-        const el = idoc.getElementById('pdfroot') || idoc.body;
-        await lib().set({
-          margin: [12, 12, 14, 12],
-          filename,
-          image: { type: 'jpeg', quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-          pagebreak: { mode: ['css', 'legacy'] },
-        }).from(el).save();
-        ui.log(`PDF 已生成、开始下载：${filename}（图片型 PDF；外站图片不允许跨域读取时可能会缺失）`);
-        return { ok: true, filename };
-      } catch (e) {
-        ui.log(`生成 PDF 失败：${e.message}（内容太长时浏览器放不下整张画布是常见原因；可以先用“预览”看排版）`);
-        return { error: e.message };
-      } finally {
-        iframe.remove();
-      }
-    }
-
-    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, translateText, downloadPdf, getLast: () => last, isBusy: () => running };
+    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, translateText, getLast: () => last, isBusy: () => running };
   }
 
   /* ---------------------------------------------------------------------- *
@@ -4575,7 +4457,7 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
-    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh, renderBriefHtml, KATEX_CSS, cleanForPdf, pdfFileName, buildPdfHtml,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh, renderBriefHtml, KATEX_CSS,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }
@@ -4976,7 +4858,6 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
         <button class="flat ghost" data-act="switch" id="switchBtn" title="主接口 / 备用接口来回切换（设置里两套都填好才会出现）" hidden>⇄ 备用</button>
         <button class="flat ghost" data-act="find" id="findBtn" title="把这道题的题面发给原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），列出最像的 3 道及原题 / VJudge 链接">🔎 搜原题</button>
         <button class="flat ghost" data-act="brief" id="briefBtn" title="从原题机 yuantiji.ac 取这道题的简要题面：模型去掉故事背景、译成英文后的题面（外加一段更简的题意），单独显示在结果区最上方；已经搜过原题就直接定位过去，没搜过会顺带搜一次">📝 简要题面</button>
-        <button class="flat ghost" data-act="pdf" title="把下面文本框里的题面 Markdown 排版（Markdown + LaTeX 公式渲染）成 A4 的 PDF 下载（图片型 PDF）">📄 下载 PDF</button>
         <button class="flat" data-act="copy">复制</button>
         <button class="flat ghost" data-act="close">关闭</button>
       </div>
@@ -5198,17 +5079,6 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
           setCopyLabel(btn, okBrief);
           break;
         }
-        case 'pdf':
-        case 'pdfbrief': {
-          const mdForPdf = btn.dataset.act === 'pdf' ? out.value : lastBriefMd;
-          if (!mdForPdf) break;
-          btn.disabled = true;
-          const oldLabel = btn.textContent;
-          btn.textContent = '生成中…';
-          try { await h.pdf(btn.dataset.act === 'pdf' ? 'main' : 'brief', mdForPdf); }
-          finally { btn.disabled = false; btn.textContent = oldLabel; }
-          break;
-        }
         case 'close': $('panel').hidden = true; break;
         case 'copy': {
           const ok = await h.copy(out.value);
@@ -5341,10 +5211,6 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
             const cb = document.createElement('button');
             cb.className = 'flat ghost'; cb.dataset.act = 'copybrief'; cb.textContent = '复制简要题面';
             bh.appendChild(cb);
-            const pb = document.createElement('button');
-            pb.className = 'flat ghost'; pb.dataset.act = 'pdfbrief'; pb.textContent = '下载 PDF';
-            pb.title = '把这份简要题面（当前显示的语言）排版成 A4 的 PDF 下载（图片型 PDF）';
-            bh.appendChild(pb);
           }
           bz.appendChild(bh);
           let bp = null;
@@ -5624,7 +5490,6 @@ body{margin:0;background:#fff;color:#202b40;font-family:system-ui,-apple-system,
       find: () => { ui.openPanel(); runner.searchOriginal().catch((e) => log('搜原题失败：', e)); },
       brief: () => { ui.openPanel(); if (ui.showBrief && ui.showBrief()) return; runner.searchOriginal().catch((e) => log('获取简要题面失败：', e)); },
       translateText: (t) => runner.translateText(t),
-      pdf: (kind, md) => runner.downloadPdf(kind, md),
       onSaved: () => {
         if (isList) {                                                // 题单页：间隔改了，按钮上的提示跟着变；不会因为改设置就重新跑一遍整个题单
           if (ui.stateName() === 'idle' && listCount()) ui.state('idle', listLabel(listCount()), listTip());

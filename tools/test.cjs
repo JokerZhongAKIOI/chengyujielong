@@ -1190,20 +1190,6 @@ ${JSON.stringify([['wrb.fr', 'MkEWBc', null, null, null, null, 'generic']])}`), 
     }
   });
 
-  test('生成 PDF：清洗掉注释/占位符、文件名与整页排版 HTML 拼得对', () => {
-    const md = '# P2085 葫芦娃救爷爷\n\n<!-- 识别备注 -->\n\n%%PDF:1%%\n\n有 $n$ 个葫芦娃。\n\n![图](https://example.com/a.png)\n';
-    const clean = plugin.cleanForPdf(md);
-    assert.ok(!clean.includes('识别备注') && !clean.includes('%%PDF'), `注释/占位符要清掉：${clean}`);
-    assert.ok(clean.includes('有 $n$ 个葫芦娃') && clean.includes('a.png'), '正文与图片保留');
-    assert.strictEqual(plugin.pdfFileName({ pid: 'P2085', title: 'P2085 葫芦娃救爷爷' }, 'main'), 'P2085 葫芦娃救爷爷.pdf');
-    assert.strictEqual(plugin.pdfFileName({ pid: 'P2085', title: '葫芦娃/救:爷爷' }, 'brief'), 'P2085 葫芦娃-救-爷爷 简要题面.pdf');
-    assert.strictEqual(plugin.pdfFileName(null, 'main'), '题面.pdf');
-    assert.strictEqual(plugin.pdfFileName(null, 'brief'), '简要题面.pdf');
-    const page = plugin.buildPdfHtml('P2085 <测试>', '<p>正文</p>');
-    assert.ok(page.includes(plugin.KATEX_CSS) && page.includes('id="pdfroot"') && page.includes('<p>正文</p>'), '整页要带 KaTeX 样式与正文容器');
-    assert.ok(page.includes('<title>P2085 &lt;测试&gt;</title>'), '文档标题要转义');
-  });
-
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
