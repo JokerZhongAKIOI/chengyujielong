@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.13.1
-// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，还可一键用 Google 翻译成中文
+// @version      2.14.0
+// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，可一键用 Google 翻译成中文，并可渲染成带公式排版的预览
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
 // @match        *://www.goj.wiki/d/*/contest/*/p/*
@@ -19,6 +19,8 @@
 // @connect      *
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js#sha256=5b5799e6f8c680663207ac5b42ee14eed2a406fa7af48f50c154f0c0b1566946
 // @require      https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js#sha256=feabdf309770ed24bba31a5467836cdc8cf639c705af27d52b585b041bb8527b
+// @require      https://cdn.jsdelivr.net/npm/markdown-it@15.0.3/dist/browser/markdown-it.umd.min.js#sha256=391f2aa638e75e6c7859d0a5c5650ef0956722a45998f17e05b83bc655778e1e
+// @require      https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.js#sha256=103a53763cc033bba8d175bf3f0ba597c3505c9b6747dd3f2c7bc2a6bfcc8ae7
 // ==/UserScript==
 
 /*
@@ -36,7 +38,7 @@
  *      重写题面 + 跳过过短题面 + 重排），在面板里列出最像的 3 道：相似度（cos）、原题链接，
  *      以及按 uid（Source/题号）拼出的 VJudge 链接。结果不会混进题面 Markdown，要复制用结果区的“复制结果”。
  *      同一次搜索还会带回原题机给本题重写的简要题面（英文），点“📝 简要题面”可单独查看 / 单独复制，
- *      简要题面区里还能一键用 Google 翻译成中文（点了才发）。
+ *      简要题面区里还能一键用 Google 翻译成中文（点了才发）、一键渲染预览（Markdown + LaTeX 排版后读）。
  *
  * 本文件被 Node 测试以 require() 方式加载时只导出纯函数（见文件末尾），不会触碰 DOM / GM_*。
  */
@@ -46,7 +48,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.13.1';
+  const VERSION = '2.14.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -3481,6 +3483,103 @@
   }
 
   /* ====================================================================== *
+   * 4d. 简要题面预览（照“文章阅读器”的原理：markdown-it + KaTeX）
+   *
+   * 只给简要题面用：把纯文本里的 Markdown 与 $…$ 公式排版好了再看。做法与
+   * 阅读器一致——markdown-it 关掉原始 HTML（html:false）保证第三方文字进入
+   * DOM 的只会是转义后的文本；公式不靠事后扫文本，而是在 markdown-it 里加
+   * 两条规则（行内 $…$、块级 $$…$$），token 交给 katex.renderToString
+   * （trust:false）。两个库都在脚本头用 @require 载入（与 pdf.js 一样带 SRI
+   * 校验）；没加载到时 renderBriefHtml 返回 null，UI 提示看原文。KaTeX 的
+   * 样式在首次预览时才插进面板（见 ensureKatexCss）。
+   * ====================================================================== */
+  const KATEX_CSS = 'https://cdn.jsdelivr.net/npm/katex@0.19.0/dist/katex.min.css';
+
+  function getKatex() {
+    const k = typeof katex !== 'undefined' ? katex : (typeof window !== 'undefined' ? window.katex : null);
+    return k && typeof k.renderToString === 'function' ? k : null;
+  }
+
+  function getMarkdownIt() {
+    const m = typeof markdownit !== 'undefined' ? markdownit : (typeof window !== 'undefined' ? window.markdownit : null);
+    return typeof m === 'function' ? m : null;
+  }
+
+  let briefMdIt = null;
+  /** 配好数学规则的 markdown-it（缓存单例）；两个库缺一返回 null。 */
+  function briefRenderer() {
+    if (briefMdIt) return briefMdIt;
+    const mit = getMarkdownIt();
+    const kx = getKatex();
+    if (!mit || !kx) return null;
+    const md = mit({ html: false, linkify: true, typographer: false });
+    const linkOpen = md.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+      const href = tokens[idx].attrGet('href');
+      if (href && /^(https?:)?\/\//i.test(href)) { tokens[idx].attrSet('target', '_blank'); tokens[idx].attrSet('rel', 'noopener noreferrer'); }
+      return linkOpen(tokens, idx, options, env, self);
+    };
+    md.inline.ruler.before('escape', 'math_inline', (state, silent) => {
+      const pos = state.pos;
+      const src = state.src;
+      if (src[pos] !== '$' || (pos > 0 && src[pos - 1] === '\\')) return false;
+      const dbl = src[pos + 1] === '$';
+      const marker = dbl ? '$$' : '$';
+      const begin = pos + marker.length;
+      if (!dbl && src[begin] === ' ') return false;
+      let end = src.indexOf(marker, begin);
+      while (end >= 0 && src[end - 1] === '\\') end = src.indexOf(marker, end + marker.length);
+      if (end < 0 || end === begin || (!dbl && src[end - 1] === ' ')) return false;
+      if (!silent) { const token = state.push('math_inline', '', 0); token.content = src.slice(begin, end); token.meta = { display: dbl }; }
+      state.pos = end + marker.length;
+      return true;
+    });
+    md.block.ruler.before('fence', 'math_block', (state, start, end, silent) => {
+      const line = state.src.slice(state.bMarks[start] + state.tShift[start], state.eMarks[start]);
+      if (!line.startsWith('$$')) return false;
+      let close = start;
+      let content = line.slice(2);
+      const inlineEnd = content.indexOf('$$');
+      if (inlineEnd >= 0) {
+        content = content.slice(0, inlineEnd);
+      } else {
+        const lines = [];
+        if (content.trim()) lines.push(content);
+        for (close = start + 1; close < end; close++) {
+          const row = state.src.slice(state.bMarks[close], state.eMarks[close]);
+          const stop = row.indexOf('$$');
+          if (stop >= 0) { lines.push(row.slice(0, stop)); break; }
+          lines.push(row);
+        }
+        if (close === end) return false;
+        content = lines.join('\n');
+      }
+      if (!silent) { const token = state.push('math_block', '', 0); token.content = content; token.map = [start, close + 1]; }
+      state.line = close + 1;
+      return true;
+    });
+    const formula = (tex, display) => {
+      try { return kx.renderToString(tex, { displayMode: display, throwOnError: false, trust: false, strict: 'ignore' }); }
+      catch (e) { return md.utils.escapeHtml(tex); }
+    };
+    md.renderer.rules.math_inline = (tokens, idx) => formula(tokens[idx].content, tokens[idx].meta.display);
+    md.renderer.rules.math_block = (tokens, idx) => `<div class="katex-display">${formula(tokens[idx].content, true)}</div>`;
+    briefMdIt = md;
+    return md;
+  }
+
+  /**
+   * 简要题面纯文本 → 排版好的 HTML。供简要题面区的“预览”用 innerHTML 显示——
+   * 这是全脚本唯一把第三方文字变成 HTML 的地方：HTML 由 markdown-it（html:false）
+   * 与 KaTeX（trust:false）生成，原文里的标签只会被转义。库没加载到返回 null。
+   */
+  function renderBriefHtml(text) {
+    const md = briefRenderer();
+    if (!md) return null;
+    return md.render(String(text || ''));
+  }
+
+  /* ====================================================================== *
    * 5. PDF 识别：校验 → 文字层（默认）/ 视觉模型（可选，扫描件用）
    * ====================================================================== */
   function pdfStart(u8) {
@@ -4358,7 +4457,7 @@
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
-    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh, renderBriefHtml, KATEX_CSS,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }
@@ -4719,6 +4818,15 @@
     .findbox .more { border: none; background: none; box-shadow: none; padding: 2px 0; font-size: 12px; color: #2563eb; cursor: pointer; white-space: nowrap; }
     .findbox .more + .more { margin-left: 12px; }
     .findbox .briefshort { font-size: 12px; color: #374151; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+    .findbox .briefview { font-size: 13.5px; line-height: 1.7; color: #111827; overflow-wrap: anywhere; }
+    .findbox .briefview p { margin: 0 0 8px; }
+    .findbox .briefview .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; margin: 4px 0; }
+    .findbox .briefview .katex { font-size: 1.05em; }
+    .findbox .briefview :not(pre) > code { background: #eef2ff; padding: 1px 4px; border-radius: 4px; }
+    .findbox .briefview pre { background: #172236; color: #e8eefb; overflow: auto; padding: 10px; border-radius: 8px; line-height: 1.5; }
+    .findbox .briefview blockquote { border-left: 3px solid #7c9ce2; margin: 6px 0; padding-left: 10px; color: #4b5563; }
+    .findbox .briefview table { border-collapse: collapse; display: block; overflow: auto; }
+    .findbox .briefview th, .findbox .briefview td { border: 1px solid #d6dce6; padding: 4px 8px; }
     .findbox .err { color: #b91c1c; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
     .card select { min-width: 0; padding: 5px 8px; font: inherit; color: #111827; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; }
     .pickrow { font-size: 12px; color: #4b5563; }
@@ -4858,6 +4966,16 @@
     let lastBriefMd = '';          // 最近一次拿到的简要题面 Markdown（“复制简要题面”按钮复制它）
     let lastBriefZh = null;        // 最近一次简要题面的中文机翻（{t0,t1}；没翻过是 null）
     let lastBriefMeta = null;      // 那道题的 meta（切换中英文时重拼要复制的 Markdown 用）
+    let katexCssDone = false;
+    /** 首次预览时把 KaTeX 官方样式插进面板（公式的字体与排版靠它；只插一次）。 */
+    function ensureKatexCss() {
+      if (katexCssDone) return;
+      katexCssDone = true;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.href = KATEX_CSS;
+      root.appendChild(l);
+    }
     const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `msg${kind ? ` ${kind}` : ''}`; };
     const readForm = () => ({
       engine: fields.engine.value,
@@ -5083,6 +5201,12 @@
           tb.textContent = '翻译成中文';
           tb.title = '用 Google 翻译把这段英文简要题面译成中文（会把这段文字发给 translate.googleapis.com；公式会先占位保护，不会被翻坏）';
           bh.appendChild(tb);
+          const pvBtn = document.createElement('button');
+          pvBtn.className = 'flat ghost';
+          pvBtn.type = 'button';
+          pvBtn.textContent = '预览';
+          pvBtn.title = '把简要题面按 Markdown + LaTeX 排版后预览（公式渲染出来读）';
+          bh.appendChild(pvBtn);
           if (lastBriefMd) {
             const cb = document.createElement('button');
             cb.className = 'flat ghost'; cb.dataset.act = 'copybrief'; cb.textContent = '复制简要题面';
@@ -5093,6 +5217,10 @@
           if (rwBrief.t0) { bp = document.createElement('div'); bp.className = 'brief'; bp.textContent = rwBrief.t0; bz.appendChild(bp); }
           let bs = null;
           if (rwBrief.t1) { bs = document.createElement('div'); bs.className = 'briefshort'; bs.textContent = `更简版题意：${rwBrief.t1}`; bz.appendChild(bs); }
+          const pv = document.createElement('div');
+          pv.className = 'briefview';
+          pv.hidden = true;
+          bz.appendChild(pv);
           const fn = document.createElement('div');
           fn.className = 'sub';
           const fnEn = '原题机的模型去掉故事背景后重写的，细节仍以原题面为准。';
@@ -5100,6 +5228,21 @@
           bz.appendChild(fn);
           box.appendChild(bz);
           let showingZh = false;
+          let previewing = false;
+          const fillPreview = () => {
+            const cur = (showingZh && lastBriefZh) ? lastBriefZh : rwBrief;
+            pv.textContent = '';
+            const addPart = (t, label) => {
+              if (!t) return;
+              if (label) { const lb = document.createElement('div'); lb.className = 'sub'; lb.textContent = label; pv.appendChild(lb); }
+              const d = document.createElement('div');
+              const html = renderBriefHtml(t);
+              if (html == null) d.textContent = t; else d.innerHTML = html;   // HTML 由 markdown-it(html:false)+KaTeX 生成，见 4d 节
+              pv.appendChild(d);
+            };
+            addPart(cur.t0, '');
+            addPart(cur.t1, '更简版题意：');
+          };
           const applyBriefLang = () => {
             const useZh = showingZh && !!lastBriefZh;
             const cur = useZh ? lastBriefZh : rwBrief;
@@ -5109,6 +5252,7 @@
             fn.textContent = useZh ? 'Google 翻译的中文（机翻）；原稿是原题机重写的英文版，细节仍以原题面为准。' : fnEn;
             tb.textContent = useZh ? '看英文原文' : (lastBriefZh ? '看中文翻译' : '翻译成中文');
             lastBriefMd = briefMarkdown(cur, lastBriefMeta, useZh) || lastBriefMd;
+            if (previewing) fillPreview();
           };
           tb.addEventListener('click', async () => {
             if (lastBriefZh) { showingZh = !showingZh; applyBriefLang(); return; }
@@ -5127,6 +5271,15 @@
             } finally {
               tb.disabled = false;
             }
+          });
+          pvBtn.addEventListener('click', () => {
+            if (!previewing && !briefRenderer()) { fn.textContent = '预览组件（KaTeX / markdown-it）没加载到（CDN 可能连不上），先看原文。'; return; }
+            previewing = !previewing;
+            if (bp) bp.hidden = previewing;
+            if (bs) bs.hidden = previewing;
+            pv.hidden = !previewing;
+            pvBtn.textContent = previewing ? '看原文' : '预览';
+            if (previewing) { ensureKatexCss(); fillPreview(); }
           });
         }
         if (!data.rows.length) {

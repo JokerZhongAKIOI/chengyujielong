@@ -1172,6 +1172,24 @@ ${JSON.stringify([['wrb.fr', 'MkEWBc', null, null, null, null, 'generic']])}`), 
     assert.ok(mdZh.includes('Google 翻译') && mdZh.includes('中文版简要题面'), mdZh);
   });
 
+  test('简要题面预览：markdown-it(html:false)+KaTeX 排版公式，第三方 HTML 只会被转义；库没加载到返回 null', () => {
+    assert.strictEqual(plugin.renderBriefHtml('x'), null, '先确认没库时是 null（UI 会提示看原文）');
+    global.markdownit = require('markdown-it');   // 假装脚本头的 @require 已把两个库载入（同版本已装进 devDependencies）
+    global.katex = require('katex');
+    try {
+      const html = plugin.renderBriefHtml('Given $a_i$ and\n\n$$\nx^2+y^2=z^2\n$$\n\n**bold** <img src=x onerror=alert(1)> [链接](https://example.com)');
+      assert.ok(typeof html === 'string' && html.includes('class="katex"'), '行内公式渲染成 KaTeX');
+      assert.ok(html.includes('katex-display'), '块级 $$ 公式渲染');
+      assert.ok(!/\$a_i\$/.test(html), '没有残留的 $…$ 生文本');
+      assert.ok(html.includes('<strong>bold</strong>'), 'Markdown 加粗生效');
+      assert.ok(!html.includes('<img'), `原文里的 HTML 必须只被转义、不能进 DOM：${html.slice(0, 200)}`);
+      assert.ok(html.includes('target="_blank"'), '外链新窗口打开（照阅读器的 link_open 处理）');
+    } finally {
+      delete global.markdownit;
+      delete global.katex;
+    }
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
