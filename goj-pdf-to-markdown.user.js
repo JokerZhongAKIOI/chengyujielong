@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.13.0
+// @version      2.13.1
 // @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，还可一键用 Google 翻译成中文
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
@@ -46,7 +46,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.13.0';
+  const VERSION = '2.13.1';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -3311,12 +3311,15 @@
    * 4c. 机翻成中文（Google 翻译的免费 gtx 接口，免 Key）
    *
    * 简要题面是英文的，面板里点“翻译成中文”才发（不自动发：又是一家第三方）。
-   * 用的是 translate.googleapis.com 的 translate_a/single?client=gtx——Google 翻译
-   * 网页版同源的免费接口，无需 Key（国内网络多半要代理才能连上，连不上会把原因
-   * 写进日志）。公式 $…$ 先换成 ⟦n⟧ 占位再翻、译完换回，免得被机翻改坏。
+   * 都是 Google 翻译的免费接口、免 Key，依次尝试三层（前面被限流就自动换下一层）：
+   *   1. translate.google.com 网页版同款的 batchexecute（MkEWBc；f.sid/bl 可留空）；
+   *   2. translate.google.com 的 translate_a/single?client=at（POST）；
+   *   3. translate.googleapis.com 的 gtx（POST；它家 GET 常年 429，所以放最后）。
+   * 协议照开源库 google-translate-api-x 的实现写。公式 $…$ 先换成 ⟦n⟧ 占位再翻、
+   * 译完换回，免得被机翻改坏。国内网络多半要代理才能连上 Google，失败原因写日志。
    * ====================================================================== */
   const GTX_API = 'https://translate.googleapis.com/translate_a/single';
-  const TRANSLATE_CHUNK = 1200;              // GET 的 q 太长会被拒，分段发
+  const TRANSLATE_CHUNK = 3000;              // 一次别发太长（网页接口上限约 5000 字），长文分段逐段发
 
   /** 把 $…$ / $$…$$ / \(…\) / \[…\] 换成 ⟦0⟧ 这样的占位（机翻一般会原样保留它）。 */
   function protectMath(text) {
@@ -3350,7 +3353,93 @@
     return chunks.length ? chunks : [''];
   }
 
-  const gtxUrl = (q) => `${GTX_API}?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(q)}`;
+  const GT_WEB = 'https://translate.google.com';
+  const gtWebUrl = () => `${GT_WEB}/_/TranslateWebserverUi/data/batchexecute?rpcids=MkEWBc&source-path=%2F&f.sid=&bl=&hl=zh-CN&soc-app=1&soc-platform=1&soc-device=1&_reqid=${Math.floor(1000 + Math.random() * 9000)}&rt=c`;
+  const gtWebBody = (text) => `f.req=${encodeURIComponent(JSON.stringify([[['MkEWBc', JSON.stringify([[text, 'auto', 'zh-CN', false], [null]]), null, '0']]]))}&`;
+
+  /**
+   * 解析 batchexecute 的返回：开头有 )]}' 防护、按行分块（长度行 + JSON 行），
+   * 找到 "wrb.fr" 那块，里层 JSON 的 [1][0][0][5] 是分句的译文段，拼起来。
+   * 拿不到（被拒时里层是 null）返回 ''，好让上层换下一个接口。
+   */
+  function parseGtWebResponse(text) {
+    const body = String(text || '');
+    for (const line of body.slice(6).split('\n')) {
+      if (line[0] !== '[' || line[3] === 'e') continue;
+      let chunk;
+      try { chunk = JSON.parse(line); } catch (e) { continue; }
+      if (!Array.isArray(chunk)) continue;
+      for (const entry of chunk) {
+        if (!Array.isArray(entry) || entry[0] !== 'wrb.fr') continue;
+        if (entry[2] == null) return '';
+        let inner;
+        try { inner = JSON.parse(entry[2]); } catch (e) { return ''; }
+        const node = inner && inner[1] && inner[1][0] && inner[1][0][0];
+        if (!node) return '';
+        if (Array.isArray(node[5])) return node[5].map((x) => (x && typeof x[0] === 'string' ? x[0] : '')).filter(Boolean).join('');
+        return typeof node[0] === 'string' ? node[0] : '';
+      }
+    }
+    return '';
+  }
+
+  /** client=at 的返回是正经 JSON：{sentences:[{trans:"译文"},…]}。 */
+  function parseAtResponse(text) {
+    let j;
+    try { j = JSON.parse(String(text || '')); } catch (e) { throw new Error('Google 翻译（at 接口）返回的不是 JSON（可能被限流或改版）'); }
+    const sens = j && Array.isArray(j.sentences) ? j.sentences : null;
+    if (!sens) throw new Error('Google 翻译（at 接口）的返回里没有译文（可能被限流或改版）');
+    const s = sens.map((x) => (x && typeof x.trans === 'string' ? x.trans : '')).join('');
+    if (!s.trim()) throw new Error('Google 翻译（at 接口）没返回译文');
+    return s;
+  }
+
+  function gtHttpError(status, text) {
+    const e = new Error(describeTranslateError(status, errorMessage(text)));
+    e.status = status;
+    return e;
+  }
+
+  /** 分段逐段翻（oneChunk 负责一段的请求 + 解析），段间不丢字地拼回去。 */
+  async function translateChunks(text, oneChunk) {
+    const out = [];
+    for (const chunk of chunkForTranslate(text)) {
+      if (!chunk.trim()) { out.push(chunk); continue; }
+      out.push(await oneChunk(chunk));
+    }
+    return out.join('');
+  }
+
+  const GT_FORM = { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' };
+
+  /** 第 1 层：translate.google.com 网页版同款的 batchexecute。 */
+  async function translateViaWeb(text, deps) {
+    return translateChunks(text, async (chunk) => {
+      const res = await deps.http({ method: 'POST', url: gtWebUrl(), timeout: 60000, headers: GT_FORM, data: gtWebBody(chunk) });
+      if (!(res.status >= 200 && res.status < 300)) throw gtHttpError(res.status, res.text);
+      const zh = parseGtWebResponse(res.text);
+      if (!zh.trim()) { const e = new Error('Google 翻译（网页接口）没返回译文（多半是被拒了）'); e.status = 429; throw e; }
+      return zh;
+    });
+  }
+
+  /** 第 2 层：translate_a/single?client=at（POST）。 */
+  async function translateViaAt(text, deps) {
+    return translateChunks(text, async (chunk) => {
+      const res = await deps.http({ method: 'POST', url: `${GT_WEB}/translate_a/single?client=at&dt=t&dt=rm&dj=1`, timeout: 60000, headers: GT_FORM, data: `sl=auto&tl=zh-CN&q=${encodeURIComponent(chunk)}` });
+      if (!(res.status >= 200 && res.status < 300)) throw gtHttpError(res.status, res.text);
+      return parseAtResponse(res.text);
+    });
+  }
+
+  /** 第 3 层：老的 gtx，但用 POST（GET 更容易 429、长度还受限）。 */
+  async function translateViaGtx(text, deps) {
+    return translateChunks(text, async (chunk) => {
+      const res = await deps.http({ method: 'POST', url: `${GTX_API}?client=gtx&sl=auto&tl=zh-CN&dt=t`, timeout: 60000, headers: { ...GT_FORM, Accept: 'application/json' }, data: `q=${encodeURIComponent(chunk)}` });
+      if (!(res.status >= 200 && res.status < 300)) throw gtHttpError(res.status, res.text);
+      return parseGtxResponse(res.text);
+    });
+  }
 
   /** gtx 的返回是层层数组：[[["译文","原文",…],…],…]，把每段译文拼起来。 */
   function parseGtxResponse(text) {
@@ -3368,19 +3457,27 @@
     return msg || '翻译失败';
   }
 
-  /** 一段英文 → 中文（公式先保护，长文分段逐段发）。deps = { http }，和搜原题同一个。 */
+  /**
+   * 一段英文 → 中文（公式先保护；三层免费接口依次试，前面被限流自动换下一层）。
+   * deps = { http }，和搜原题同一个。
+   */
   async function translateToZh(text, deps) {
     const src = String(text || '').trim();
     if (!src) return '';
     const safe = protectMath(src);
-    const out = [];
-    for (const chunk of chunkForTranslate(safe.text)) {
-      if (!chunk.trim()) { out.push(chunk); continue; }
-      const res = await deps.http({ method: 'GET', url: gtxUrl(chunk), timeout: 60000, headers: { Accept: 'application/json' } });
-      if (!(res.status >= 200 && res.status < 300)) throw new Error(describeTranslateError(res.status, errorMessage(res.text)));
-      out.push(parseGtxResponse(res.text));
+    const errs = [];
+    for (const via of [translateViaWeb, translateViaAt, translateViaGtx]) {
+      try {
+        const zh = await via(safe.text, deps);
+        if (zh && zh.trim()) return restoreMath(zh, safe.parts).trim();
+        errs.push(new Error('Google 翻译没返回译文'));
+      } catch (e) {
+        errs.push(e);
+      }
     }
-    return restoreMath(out.join(''), safe.parts).trim();
+    if (errs.some((e) => e && e.status === 429)) throw new Error('Google 翻译的几种免费接口都被限流了（HTTP 429）：这个 IP 短时间请求太多，过几分钟、或换个网络 / 代理节点再点');
+    if (errs.length && errs.every((e) => e && e.status === 0)) throw new Error(describeTranslateError(0, ''));
+    throw errs[errs.length - 1] || new Error('翻译失败');
   }
 
   /* ====================================================================== *
@@ -4261,7 +4358,7 @@
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
-    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, translateToZh,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, GT_WEB, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, parseGtWebResponse, parseAtResponse, translateToZh,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }

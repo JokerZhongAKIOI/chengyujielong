@@ -1119,26 +1119,55 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(plugin.briefMarkdown(null, {}), '');
   });
 
-  await testAsync('机翻成中文：走 Google gtx 接口，公式先保护不翻坏，长文分段发，连不上把话说清', async () => {
+  await testAsync('机翻成中文：优先走 translate.google.com 网页接口，公式先保护不翻坏；被限流自动换备用接口', async () => {
     const pm = plugin.protectMath('Given $a_i$ and $$x^2$$ end.');
     assert.deepStrictEqual(pm.parts, ['$a_i$', '$$x^2$$']);
     assert.ok(!pm.text.includes('$'), `公式应全被占位：${pm.text}`);
     assert.strictEqual(plugin.restoreMath('给定 ⟦0⟧ 与 【 1 】 结束。', pm.parts), '给定 $a_i$ 与 $$x^2$$ 结束。');
     assert.strictEqual(plugin.parseGtxResponse('[[["给定","Given"],["序列","array"]],null,"en"]'), '给定序列');
-    const urls = [];
+    // batchexecute 的返回样例（照 google-translate-api-x 的解析方式造）
+    const webRespOf = (segs) => `)]}'
+
+123
+${JSON.stringify([['wrb.fr', 'MkEWBc', JSON.stringify([null, [[[null, null, null, null, null, segs.map((t) => [t])]]]]), null, null, null, 'generic']])}
+`;
+    assert.strictEqual(plugin.parseGtWebResponse(webRespOf(['给定 ⟦0⟧，', '把它变成不下降。'])), '给定 ⟦0⟧，把它变成不下降。');
+    assert.strictEqual(plugin.parseGtWebResponse(`)]}'
+
+9
+${JSON.stringify([['wrb.fr', 'MkEWBc', null, null, null, null, 'generic']])}`), '', '被拒时返回空，好换下一个接口');
+    const calls = [];
     const zh = await plugin.translateToZh('Given $a_i$ make it non-decreasing.', {
-      http: async (o) => { urls.push(o.url); return { status: 200, text: '[[["给定 ⟦0⟧，把它变成不下降。","x"]],null,"en"]' }; },
+      http: async (o) => {
+        calls.push(o);
+        if (o.url.includes('batchexecute')) return { status: 200, text: webRespOf(['给定 ⟦0⟧，把它变成不下降。']) };
+        throw new Error('第一层就成功，不该走到备用接口');
+      },
     });
     assert.strictEqual(zh, '给定 $a_i$，把它变成不下降。', '译文回来后公式要原样换回');
-    assert.ok(urls[0].startsWith(plugin.GTX_API) && urls[0].includes('client=gtx') && urls[0].includes('tl=zh-CN'), urls[0]);
-    assert.ok(!decodeURIComponent(urls[0]).includes('$a_i$'), '发出去之前公式已被占位替换');
-    let calls = 0;
-    await plugin.translateToZh('word '.repeat(600), {   // 3000 字，超过一段的上限
-      http: async () => { calls++; return { status: 200, text: '[[["词","word"]],null,"en"]' }; },
+    assert.strictEqual(calls.length, 1);
+    assert.ok(calls[0].url.startsWith(`${plugin.GT_WEB}/_/TranslateWebserverUi/data/batchexecute`) && calls[0].method === 'POST', calls[0].url);
+    assert.ok(decodeURIComponent(calls[0].data).includes('MkEWBc') && !decodeURIComponent(calls[0].data).includes('$a_i$'), '公式已占位再发');
+    // 第一层 429 → 自动换 client=at
+    const zh2 = await plugin.translateToZh('Given $a_i$.', {
+      http: async (o) => {
+        if (o.url.includes('batchexecute')) return { status: 429, text: 'Too Many Requests' };
+        if (o.url.includes('client=at')) return { status: 200, text: JSON.stringify({ sentences: [{ trans: '给定 ⟦0⟧。', orig: 'x' }], src: 'en' }) };
+        throw new Error('第二层就够了');
+      },
     });
-    assert.ok(calls >= 2, `长文要分段发，实际发了 ${calls} 次`);
-    const err = await plugin.translateToZh('hello', { http: async () => ({ status: 0, text: '' }) }).catch((e) => e);
-    assert.ok(/连不上 Google 翻译/.test(err.message), err.message);
+    assert.strictEqual(zh2, '给定 $a_i$。');
+    // 三层全 429 → 把话说成“这个 IP 被限流”，而不是含糊的“过一会儿”
+    const err429 = await plugin.translateToZh('hello', { http: async () => ({ status: 429, text: '' }) }).catch((e) => e);
+    assert.ok(/都被限流/.test(err429.message), err429.message);
+    const err0 = await plugin.translateToZh('hello', { http: async () => ({ status: 0, text: '' }) }).catch((e) => e);
+    assert.ok(/连不上 Google 翻译/.test(err0.message), err0.message);
+    // 长文分段
+    let webCalls = 0;
+    await plugin.translateToZh('word '.repeat(1500), {
+      http: async (o) => { if (o.url.includes('batchexecute')) { webCalls++; return { status: 200, text: webRespOf(['词']) }; } throw new Error('不该走到备用'); },
+    });
+    assert.ok(webCalls >= 2, `7500 字要分段发，实际 ${webCalls} 次`);
     const mdZh = plugin.briefMarkdown({ t0: '中文版简要题面', t1: '' }, { pid: 'P1', title: '题' }, true);
     assert.ok(mdZh.includes('Google 翻译') && mdZh.includes('中文版简要题面'), mdZh);
   });
