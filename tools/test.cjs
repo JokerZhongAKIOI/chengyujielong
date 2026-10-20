@@ -1119,6 +1119,30 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.strictEqual(plugin.briefMarkdown(null, {}), '');
   });
 
+  await testAsync('机翻成中文：走 Google gtx 接口，公式先保护不翻坏，长文分段发，连不上把话说清', async () => {
+    const pm = plugin.protectMath('Given $a_i$ and $$x^2$$ end.');
+    assert.deepStrictEqual(pm.parts, ['$a_i$', '$$x^2$$']);
+    assert.ok(!pm.text.includes('$'), `公式应全被占位：${pm.text}`);
+    assert.strictEqual(plugin.restoreMath('给定 ⟦0⟧ 与 【 1 】 结束。', pm.parts), '给定 $a_i$ 与 $$x^2$$ 结束。');
+    assert.strictEqual(plugin.parseGtxResponse('[[["给定","Given"],["序列","array"]],null,"en"]'), '给定序列');
+    const urls = [];
+    const zh = await plugin.translateToZh('Given $a_i$ make it non-decreasing.', {
+      http: async (o) => { urls.push(o.url); return { status: 200, text: '[[["给定 ⟦0⟧，把它变成不下降。","x"]],null,"en"]' }; },
+    });
+    assert.strictEqual(zh, '给定 $a_i$，把它变成不下降。', '译文回来后公式要原样换回');
+    assert.ok(urls[0].startsWith(plugin.GTX_API) && urls[0].includes('client=gtx') && urls[0].includes('tl=zh-CN'), urls[0]);
+    assert.ok(!decodeURIComponent(urls[0]).includes('$a_i$'), '发出去之前公式已被占位替换');
+    let calls = 0;
+    await plugin.translateToZh('word '.repeat(600), {   // 3000 字，超过一段的上限
+      http: async () => { calls++; return { status: 200, text: '[[["词","word"]],null,"en"]' }; },
+    });
+    assert.ok(calls >= 2, `长文要分段发，实际发了 ${calls} 次`);
+    const err = await plugin.translateToZh('hello', { http: async () => ({ status: 0, text: '' }) }).catch((e) => e);
+    assert.ok(/连不上 Google 翻译/.test(err.message), err.message);
+    const mdZh = plugin.briefMarkdown({ t0: '中文版简要题面', t1: '' }, { pid: 'P1', title: '题' }, true);
+    assert.ok(mdZh.includes('Google 翻译') && mdZh.includes('中文版简要题面'), mdZh);
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {

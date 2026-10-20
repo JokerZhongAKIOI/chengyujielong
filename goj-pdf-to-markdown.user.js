@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GOJ 题面 PDF 转 Markdown 并复制
 // @namespace    https://github.com/JokerZhongAKIOI/ZZMMXX
-// @version      2.12.0
-// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制
+// @version      2.13.0
+// @description  在 goj.wiki（Hydro）题目页自动识别题面里嵌入的 PDF：直接读取 PDF 文字层，转成 Markdown（公式为 LaTeX）并复制到剪贴板；公式被“打印”成矢量图形、文字层里没有的 PDF 也能逐处裁图补全；一份 PDF 里有多道题时只取与本题同名的那一道；题单（训练）页一键复制其中所有题目的题面，每题间隔 0.5 秒（共用的 PDF 只下载一次）；认不出分题结构时会提醒；扫描件可选用视觉大模型；还可以把题面发给原题机 yuantiji.ac 搜原题（Expert 模式，列出最像的 3 道及相似度、原题 / VJudge 链接），并能取这道题的简要题面（原题机重写的英文版）单独显示、单独复制，还可一键用 Google 翻译成中文
 // @match        *://www.goj.wiki/d/*/p/*
 // @match        *://www.goj.wiki/p/*
 // @match        *://www.goj.wiki/d/*/contest/*/p/*
@@ -35,7 +35,8 @@
  *   5. （可选）搜原题：点面板里的“🔎 搜原题”，把转好的题面发给原题机 yuantiji.ac 的公开接口（Expert：
  *      重写题面 + 跳过过短题面 + 重排），在面板里列出最像的 3 道：相似度（cos）、原题链接，
  *      以及按 uid（Source/题号）拼出的 VJudge 链接。结果不会混进题面 Markdown，要复制用结果区的“复制结果”。
- *      同一次搜索还会带回原题机给本题重写的简要题面（英文），点“📝 简要题面”可单独查看 / 单独复制。
+ *      同一次搜索还会带回原题机给本题重写的简要题面（英文），点“📝 简要题面”可单独查看 / 单独复制，
+ *      简要题面区里还能一键用 Google 翻译成中文（点了才发）。
  *
  * 本文件被 Node 测试以 require() 方式加载时只导出纯函数（见文件末尾），不会触碰 DOM / GM_*。
  */
@@ -45,7 +46,7 @@
   /* ====================================================================== *
    * 0. 常量
    * ====================================================================== */
-  const VERSION = '2.12.0';
+  const VERSION = '2.13.0';
   const PROMPT_VERSION = 'p3';              // 改动提示词 / 渲染参数时递增，使旧缓存失效
   const CFG_KEY = 'cfg_v1';
   const CACHE_KEY = 'cache_v2';
@@ -3275,13 +3276,15 @@
    * 本题的简要题面单独拼成 Markdown：t0 是去掉故事背景、译成英文但信息齐全的题面，
    * t1 是一段更抽象的题意。没有就返回 ''。
    */
-  function briefMarkdown(rewrites, meta) {
+  function briefMarkdown(rewrites, meta, zh) {
     const rw = normalizeRewrites(rewrites);
     if (!rw) return '';
     const parts = [`## 简要题面${metaWho(meta)}`];
     if (rw.t0) parts.push(rw.t0);
     if (rw.t1) parts.push(`**更简版题意：** ${rw.t1}`);
-    parts.push('> 由原题机 yuantiji.ac 的模型重写：去掉故事背景、译成英文，保留解题所需信息；细节仍以原题面为准。');
+    parts.push(zh
+      ? '> 由原题机 yuantiji.ac 的模型重写（英文）后经 Google 翻译译成中文；机翻难免有误，细节仍以原题面为准。'
+      : '> 由原题机 yuantiji.ac 的模型重写：去掉故事背景、译成英文，保留解题所需信息；细节仍以原题面为准。');
     return `${parts.join('\n\n')}\n`;
   }
 
@@ -3302,6 +3305,82 @@
     });
     const brief = briefMarkdown(rewrites, meta);
     return `${brief ? `${brief}\n` : ''}## 原题搜索${who}\n\n${items.join('\n')}\n\n> 数据来自原题机 yuantiji.ac（Expert：重写题面 + 跳过过短题面 + 重排），取最像的 ${rows.length} 道；相似度是题面的语义相似度（cos），点开链接核对后再下结论。\n`;
+  }
+
+  /* ====================================================================== *
+   * 4c. 机翻成中文（Google 翻译的免费 gtx 接口，免 Key）
+   *
+   * 简要题面是英文的，面板里点“翻译成中文”才发（不自动发：又是一家第三方）。
+   * 用的是 translate.googleapis.com 的 translate_a/single?client=gtx——Google 翻译
+   * 网页版同源的免费接口，无需 Key（国内网络多半要代理才能连上，连不上会把原因
+   * 写进日志）。公式 $…$ 先换成 ⟦n⟧ 占位再翻、译完换回，免得被机翻改坏。
+   * ====================================================================== */
+  const GTX_API = 'https://translate.googleapis.com/translate_a/single';
+  const TRANSLATE_CHUNK = 1200;              // GET 的 q 太长会被拒，分段发
+
+  /** 把 $…$ / $$…$$ / \(…\) / \[…\] 换成 ⟦0⟧ 这样的占位（机翻一般会原样保留它）。 */
+  function protectMath(text) {
+    const parts = [];
+    const out = String(text || '').replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\$[^$\n]+?\$|\\\([\s\S]+?\\\)/g, (m) => { parts.push(m); return `⟦${parts.length - 1}⟧`; });
+    return { text: out, parts };
+  }
+
+  /** 占位换回公式（机翻有时会把 ⟦⟧ 换成【】、或给数字两边加空格，都认）。 */
+  function restoreMath(text, parts) {
+    return String(text || '').replace(/(?:⟦|【)\s*(\d+)\s*(?:⟧|】)/g, (m, i) => (parts[Number(i)] != null ? parts[Number(i)] : m));
+  }
+
+  /** 按换行 / 句号 / 空格边界切成 ≤limit 的段（切口留在上一段的结尾，拼回去不丢字）。 */
+  function chunkForTranslate(text, limit = TRANSLATE_CHUNK) {
+    const chunks = [];
+    let rest = String(text || '');
+    while (rest.length > limit) {
+      let cut = -1;
+      const nl = rest.lastIndexOf('\n', limit);
+      if (nl >= limit * 0.4) cut = nl + 1;
+      if (cut < 0) {
+        const sp = Math.max(rest.lastIndexOf('. ', limit), rest.lastIndexOf(' ', limit));
+        if (sp >= 1) cut = sp + 1;
+      }
+      if (cut < 1) cut = limit;
+      chunks.push(rest.slice(0, cut));
+      rest = rest.slice(cut);
+    }
+    if (rest) chunks.push(rest);
+    return chunks.length ? chunks : [''];
+  }
+
+  const gtxUrl = (q) => `${GTX_API}?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(q)}`;
+
+  /** gtx 的返回是层层数组：[[["译文","原文",…],…],…]，把每段译文拼起来。 */
+  function parseGtxResponse(text) {
+    let j;
+    try { j = JSON.parse(String(text || '')); } catch (e) { throw new Error('Google 翻译返回的不是 JSON（接口可能改版或被限流）'); }
+    const segs = j && Array.isArray(j[0]) ? j[0] : null;
+    if (!segs) throw new Error('Google 翻译的返回里没有译文（接口可能改版或被限流）');
+    return segs.map((seg) => (seg && typeof seg[0] === 'string' ? seg[0] : '')).join('');
+  }
+
+  function describeTranslateError(status, msg) {
+    if (status === 0) return `连不上 Google 翻译（translate.googleapis.com)：${msg || '网络错误或超时'}（国内网络多半要开代理才能用；不急的话先看英文版）`;
+    if (status === 429) return 'Google 翻译被限流了（HTTP 429），过一会儿再点';
+    if (status >= 400) return `Google 翻译返回 HTTP ${status}${msg ? `：${String(msg).slice(0, 120)}` : ''}`;
+    return msg || '翻译失败';
+  }
+
+  /** 一段英文 → 中文（公式先保护，长文分段逐段发）。deps = { http }，和搜原题同一个。 */
+  async function translateToZh(text, deps) {
+    const src = String(text || '').trim();
+    if (!src) return '';
+    const safe = protectMath(src);
+    const out = [];
+    for (const chunk of chunkForTranslate(safe.text)) {
+      if (!chunk.trim()) { out.push(chunk); continue; }
+      const res = await deps.http({ method: 'GET', url: gtxUrl(chunk), timeout: 60000, headers: { Accept: 'application/json' } });
+      if (!(res.status >= 200 && res.status < 300)) throw new Error(describeTranslateError(res.status, errorMessage(res.text)));
+      out.push(parseGtxResponse(res.text));
+    }
+    return restoreMath(out.join(''), safe.parts).trim();
   }
 
   /* ====================================================================== *
@@ -4153,7 +4232,17 @@
       }
     }
 
-    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, getLast: () => last, isBusy: () => running };
+    /** 把一段英文（简要题面）机翻成中文。失败时原因写进日志，错误继续抛给 UI（按钮好恢复原状）。 */
+    async function translateText(text) {
+      try {
+        return await translateToZh(text, deps);
+      } catch (e) {
+        ui.log(`翻译失败：${e.message}`);
+        throw e;
+      }
+    }
+
+    return { run, runList, cancel, repick, testConnection, switchApi, searchOriginal, translateText, getLast: () => last, isBusy: () => running };
   }
 
   /* ---------------------------------------------------------------------- *
@@ -4172,7 +4261,7 @@
     holeStripCanvas, holeCropCanvases, stripContent, STRIP_PROMPT, holeNote, HOLE_MARK_RE, setCanvasFactory, makeCanvas, canvasToBlob, blobToDataUrl,
     PICK_MIN, PICK_SURE, PICK_DROP_TITLE, NOISE_HEAD_RE, META_HEAD_RE, titleLineCandidates, plainTitleCandidates, headLineScore, splitBySectionCycles, looksMultiProblem, plainText, sectionInfo, titleShape, nameKeys, keySim, nameSimilarity, parseHeadings, blockKinds, findProblems, sliceProblem,
     normalizeEndpoint, parseExtra, configProblems, errorMessage, parseCompletion, adjustBody, chat, userContent,
-    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji,
+    YUANTIJI_API, YUANTIJI_K, buildSearchQuery, parseYuantijiResponse, normalizeFindRow, parseProblemUid, vjudgeUrlOf, originalUrlOf, simLabel, findResultsMarkdown, briefMarkdown, normalizeRewrites, cleanBrief, searchYuantiji, GTX_API, protectMath, restoreMath, chunkForTranslate, parseGtxResponse, translateToZh,
     mapLimit, loadConfig, cacheGet, cachePut, createRunner,
   };
   if (typeof module === 'object' && module && module.exports) { module.exports = api; return; }
@@ -4484,21 +4573,23 @@
     * { box-sizing: border-box; }
     .dock, .card, .form { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
     .dock { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; display: flex; gap: 6px; align-items: center; }
-    button { font: inherit; cursor: pointer; border: 0; border-radius: 999px; padding: 8px 14px; color: #fff; background: #2563eb; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
+    button { font: inherit; cursor: pointer; border: 0; border-radius: 999px; padding: 8px 14px; color: #fff; background: #2563eb; box-shadow: 0 2px 10px rgba(0,0,0,.25); white-space: nowrap; }
     button:hover { filter: brightness(1.08); }
     button.mini { padding: 8px 10px; color: #374151; background: #fff; }
-    button.flat { box-shadow: none; border-radius: 6px; padding: 6px 12px; }
+    button.flat { box-shadow: none; border-radius: 8px; padding: 8px 14px; font-size: 13.5px; line-height: 1.3; }
     button.ghost { background: #e5e7eb; color: #111827; }
     .main[data-state="running"] { background: #d97706; }
     .main[data-state="done"] { background: #16a34a; }
     .main[data-state="warn"] { background: #ca8a04; }
     .main[data-state="error"], .main[data-state="needcfg"] { background: #dc2626; }
-    .card { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: min(580px, calc(100vw - 32px)); max-height: 72vh;
+    .card { position: fixed; right: 16px; bottom: 64px; z-index: 2147483647; width: min(620px, calc(100vw - 32px)); max-height: 72vh;
             display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #fff; color: #111827; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
     .card[hidden], .modal[hidden] { display: none; }
-    .row { display: flex; gap: 8px; align-items: center; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row > button { flex: none; }
     .row.end { align-items: flex-end; }
-    .grow { flex: 1; }
+    .grow { flex: 1; min-width: 0; }
+    #panelTitle { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     textarea { width: 100%; min-height: 240px; flex: 1; padding: 8px; resize: vertical; color: #111827; background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     .log { max-height: 96px; overflow: auto; white-space: pre-wrap; word-break: break-all; color: #4b5563; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
@@ -4507,10 +4598,10 @@
     .card[data-mode="list"] [data-act="rerun-ai"] { display: none; }
     .card[data-mode="list"] [data-act="find"] { display: none; }
     button:disabled { opacity: .55; cursor: wait; }
-    .findbox { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; background: #f9fafb; max-height: 230px; overflow: auto; }
+    .findbox { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; background: #f9fafb; max-height: 320px; overflow: auto; }
     .findbox[hidden] { display: none; }
-    .findbox .fh { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #374151; margin-bottom: 6px; }
-    .findbox .fh b { flex: 1; }
+    .findbox .fh { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: #374151; margin-bottom: 6px; }
+    .findbox .fh b { flex: 1; min-width: 0; }
     .findbox .fh button.flat { padding: 3px 9px; font-size: 12px; }
     .findbox ol { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     .findbox .ft { font-weight: 600; }
@@ -4522,13 +4613,14 @@
     .findbox .snip, .findbox .rw { font-size: 12px; color: #6b7280; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     .findbox .rw { color: #9ca3af; margin-top: 6px; }
     .findbox .briefbox { border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; padding: 6px 8px; margin-bottom: 8px; }
-    .findbox .briefbox .bh { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #1e3a8a; margin-bottom: 4px; }
-    .findbox .briefbox .bh b { flex: 1; }
+    .findbox .briefbox .bh { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: #1e3a8a; margin-bottom: 4px; }
+    .findbox .briefbox .bh b { flex: 1; min-width: 0; }
     .findbox .briefbox .bh button.flat { padding: 3px 9px; font-size: 12px; }
-    .findbox .brief { font-size: 12.5px; color: #1f2937; white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
+    .findbox .brief { font-size: 13px; color: #1f2937; white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
     .findbox ol .brief { font-size: 12px; color: #4b5563; }
     .findbox .brief.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
-    .findbox .more { border: none; background: none; padding: 0; font-size: 12px; color: #2563eb; cursor: pointer; }
+    .findbox .more { border: none; background: none; box-shadow: none; padding: 2px 0; font-size: 12px; color: #2563eb; cursor: pointer; white-space: nowrap; }
+    .findbox .more + .more { margin-left: 12px; }
     .findbox .briefshort { font-size: 12px; color: #374151; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
     .findbox .err { color: #b91c1c; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
     .card select { min-width: 0; padding: 5px 8px; font: inherit; color: #111827; background: #fff; border: 1px solid #d1d5db; border-radius: 8px; }
@@ -4667,6 +4759,8 @@
 
     let lastFoundMd = '';          // 最近一次搜原题结果的 Markdown（“复制结果”按钮复制它）
     let lastBriefMd = '';          // 最近一次拿到的简要题面 Markdown（“复制简要题面”按钮复制它）
+    let lastBriefZh = null;        // 最近一次简要题面的中文机翻（{t0,t1}；没翻过是 null）
+    let lastBriefMeta = null;      // 那道题的 meta（切换中英文时重拼要复制的 Markdown 用）
     const setMsg = (text, kind) => { msg.textContent = text || ''; msg.className = `msg${kind ? ` ${kind}` : ''}`; };
     const readForm = () => ({
       engine: fields.engine.value,
@@ -4843,7 +4937,7 @@
         const bBtn = $('briefBtn');
         if (bBtn) bBtn.disabled = !!(data && data.busy);
         btn.textContent = data && data.busy ? '🔎 搜索中…' : '🔎 搜原题';
-        if (!data) { box.hidden = true; box.textContent = ''; lastFoundMd = ''; lastBriefMd = ''; return; }
+        if (!data) { box.hidden = true; box.textContent = ''; lastFoundMd = ''; lastBriefMd = ''; lastBriefZh = null; lastBriefMeta = null; return; }
         box.hidden = false;
         box.textContent = '';
         const link = (href, text, title) => {
@@ -4868,11 +4962,15 @@
         if (data.error || data.busy) {
           lastFoundMd = '';
           lastBriefMd = '';
+          lastBriefZh = null;
+          lastBriefMeta = null;
           if (data.error) { const e = document.createElement('div'); e.className = 'err'; e.textContent = data.error; box.appendChild(e); }
           return;
         }
         lastFoundMd = data.md || '';
         lastBriefMd = data.briefMd || briefMarkdown(data.rewrites, data.meta) || '';
+        lastBriefZh = null;
+        lastBriefMeta = data.meta || null;
         const rwBrief = data.rewrites && (data.rewrites.t0 || data.rewrites.t1) ? data.rewrites : null;
         if (rwBrief) {
           const bz = document.createElement('div');
@@ -4882,19 +4980,57 @@
           const bb = document.createElement('b');
           bb.textContent = '本题简要题面（原题机重写 · 英文）';
           bh.appendChild(bb);
+          const tb = document.createElement('button');
+          tb.className = 'flat ghost';
+          tb.type = 'button';
+          tb.textContent = '翻译成中文';
+          tb.title = '用 Google 翻译把这段英文简要题面译成中文（会把这段文字发给 translate.googleapis.com；公式会先占位保护，不会被翻坏）';
+          bh.appendChild(tb);
           if (lastBriefMd) {
             const cb = document.createElement('button');
             cb.className = 'flat ghost'; cb.dataset.act = 'copybrief'; cb.textContent = '复制简要题面';
             bh.appendChild(cb);
           }
           bz.appendChild(bh);
-          if (rwBrief.t0) { const bp = document.createElement('div'); bp.className = 'brief'; bp.textContent = rwBrief.t0; bz.appendChild(bp); }
-          if (rwBrief.t1) { const bs = document.createElement('div'); bs.className = 'briefshort'; bs.textContent = `更简版题意：${rwBrief.t1}`; bz.appendChild(bs); }
+          let bp = null;
+          if (rwBrief.t0) { bp = document.createElement('div'); bp.className = 'brief'; bp.textContent = rwBrief.t0; bz.appendChild(bp); }
+          let bs = null;
+          if (rwBrief.t1) { bs = document.createElement('div'); bs.className = 'briefshort'; bs.textContent = `更简版题意：${rwBrief.t1}`; bz.appendChild(bs); }
           const fn = document.createElement('div');
           fn.className = 'sub';
-          fn.textContent = '原题机的模型去掉故事背景后重写的，细节仍以原题面为准。';
+          const fnEn = '原题机的模型去掉故事背景后重写的，细节仍以原题面为准。';
+          fn.textContent = fnEn;
           bz.appendChild(fn);
           box.appendChild(bz);
+          let showingZh = false;
+          const applyBriefLang = () => {
+            const useZh = showingZh && !!lastBriefZh;
+            const cur = useZh ? lastBriefZh : rwBrief;
+            if (bp && cur.t0) bp.textContent = cur.t0;
+            if (bs && cur.t1) bs.textContent = `更简版题意：${cur.t1}`;
+            bb.textContent = useZh ? '本题简要题面（中文机翻）' : '本题简要题面（原题机重写 · 英文）';
+            fn.textContent = useZh ? 'Google 翻译的中文（机翻）；原稿是原题机重写的英文版，细节仍以原题面为准。' : fnEn;
+            tb.textContent = useZh ? '看英文原文' : (lastBriefZh ? '看中文翻译' : '翻译成中文');
+            lastBriefMd = briefMarkdown(cur, lastBriefMeta, useZh) || lastBriefMd;
+          };
+          tb.addEventListener('click', async () => {
+            if (lastBriefZh) { showingZh = !showingZh; applyBriefLang(); return; }
+            tb.disabled = true;
+            tb.textContent = '翻译中…';
+            try {
+              const zh = { t0: '', t1: '' };
+              if (rwBrief.t0) zh.t0 = await h.translateText(rwBrief.t0);
+              if (rwBrief.t1) zh.t1 = await h.translateText(rwBrief.t1);
+              if (!zh.t0 && !zh.t1) throw new Error('Google 翻译没返回译文');
+              lastBriefZh = zh;
+              showingZh = true;
+              applyBriefLang();
+            } catch (e) {
+              tb.textContent = '翻译成中文';
+            } finally {
+              tb.disabled = false;
+            }
+          });
         }
         if (!data.rows.length) {
           const e = document.createElement('div');
@@ -4958,6 +5094,38 @@
                 more.textContent = clamped ? '展开它的简要题面' : '收起';
               });
               li.appendChild(more);
+            }
+            if (r.brief) {
+              const tr = document.createElement('button');
+              tr.className = 'more';
+              tr.type = 'button';
+              tr.textContent = '翻译成中文';
+              tr.title = '用 Google 翻译把这道题的简要题面译成中文';
+              let rowZh = '';
+              let rowShowingZh = false;
+              tr.addEventListener('click', async () => {
+                if (rowZh) {
+                  rowShowingZh = !rowShowingZh;
+                  sn.textContent = rowShowingZh ? rowZh : r.brief;
+                  tr.textContent = rowShowingZh ? '看英文原文' : '看中文翻译';
+                  return;
+                }
+                tr.disabled = true;
+                tr.textContent = '翻译中…';
+                try {
+                  rowZh = await h.translateText(r.brief);
+                  if (!rowZh) throw new Error('Google 翻译没返回译文');
+                  rowShowingZh = true;
+                  sn.textContent = rowZh;
+                  tr.textContent = '看英文原文';
+                } catch (e) {
+                  rowZh = '';
+                  tr.textContent = '翻译成中文';
+                } finally {
+                  tr.disabled = false;
+                }
+              });
+              li.appendChild(tr);
             }
           }
           ol.appendChild(li);
@@ -5071,6 +5239,7 @@
       switchApi: () => runner.switchApi(),
       find: () => { ui.openPanel(); runner.searchOriginal().catch((e) => log('搜原题失败：', e)); },
       brief: () => { ui.openPanel(); if (ui.showBrief && ui.showBrief()) return; runner.searchOriginal().catch((e) => log('获取简要题面失败：', e)); },
+      translateText: (t) => runner.translateText(t),
       onSaved: () => {
         if (isList) {                                                // 题单页：间隔改了，按钮上的提示跟着变；不会因为改设置就重新跑一遍整个题单
           if (ui.stateName() === 'idle' && listCount()) ui.state('idle', listLabel(listCount()), listTip());
