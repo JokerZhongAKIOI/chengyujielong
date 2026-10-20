@@ -1098,6 +1098,27 @@ const cfgWithApi = (extra) => Object.assign({}, plugin.DEFAULT_CFG, { apiUrl: 'h
     assert.ok(/候选题名/.test(r3.diag || ''), `诊断里要写候选数：${r3.diag}`);
   });
 
+  test('简要题面：本题与每道原题的 t0/t1 提出来单独用（去前缀、不截断），没给时不硬造', () => {
+    const longBrief = 'Given an array. '.repeat(40).trim();   // 600 多字，远超 snip 的 220
+    const r = plugin.parseYuantijiResponse(JSON.stringify({
+      results: [{ uid: 'CodeForces/1A', title: 'T', src: 'CodeForces', url: 'https://codeforces.com/problemset/problem/1/A', cos: 0.9, t0: `Simplified statement: ${longBrief}`, t1: 'A knapsack problem.', original: 'orig' }],
+      rewrites: { t0: 'Simplified statement: Query brief.', t1: 'Query short.' },
+    }));
+    assert.strictEqual(r.rows[0].brief, longBrief, '每道原题的简要题面要完整，不能像 snip 一样截 220 字');
+    assert.strictEqual(r.rows[0].briefShort, 'A knapsack problem.');
+    assert.strictEqual(r.rows[0].snip.length, 220, 'snip 维持原样（截一小段）');
+    assert.deepStrictEqual(r.rewrites, { t0: 'Query brief.', t1: 'Query short.' }, '本题的两档重写去掉 Simplified statement 前缀');
+    assert.strictEqual(plugin.normalizeRewrites(null), null);
+    assert.strictEqual(plugin.normalizeRewrites({}), null);
+    assert.strictEqual(plugin.normalizeFindRow({ uid: 'X/1', title: 'T', original: '只有原始片段' }).brief, '只有原始片段', '没 t0 时退回原始题面片段');
+    const md = plugin.briefMarkdown(r.rewrites, { pid: 'P1', title: '葫芦娃' });
+    assert.ok(md.startsWith('## 简要题面（P1 葫芦娃）') && md.includes('Query brief.') && md.includes('更简版题意') && md.includes('Query short.'), md);
+    const all = plugin.findResultsMarkdown(r.rows, { pid: 'P1', title: '葫芦娃' }, r.rewrites);
+    assert.ok(all.indexOf('## 简要题面') > -1 && all.indexOf('## 简要题面') < all.indexOf('## 原题搜索'), '复制结果时简要题面单分一节、排在最前');
+    assert.ok(plugin.findResultsMarkdown(r.rows, { pid: 'P1', title: '葫芦娃' }).startsWith('## 原题搜索'), '没给 rewrites 时和以前一样');
+    assert.strictEqual(plugin.briefMarkdown(null, {}), '');
+  });
+
   console.log('\n# 静态检查');
   const src = fs.readFileSync(path.join(ROOT, 'goj-pdf-to-markdown.user.js'), 'utf8');
   await testAsync('脚本能解析，且 @version 与代码里的 VERSION 一致', () => {
